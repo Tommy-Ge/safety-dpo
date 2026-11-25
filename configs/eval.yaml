@@ -1,0 +1,48 @@
+# Evaluation (safedpo eval)
+results_dir: results
+
+generation:                 # model under test; greedy decoding as in HarmBench
+  backend: vllm
+  dtype: bfloat16
+  max_model_len: 4096
+  max_new_tokens: 512
+  temperature: 0.0
+
+benchmarks:
+  harmbench:
+    enabled: true
+    # behaviors_path: path/to/local.csv   # optional offline copy
+    functional_categories: [standard, contextual]   # copyright needs a different judge
+    direct: true
+    templates: [developer_mode, evil_confidant, text_continuation, translation_pretext]  # held out from training
+    judge:
+      type: harmbench_cls
+      model: cais/HarmBench-Llama-2-13b-cls
+      backend: vllm
+      dtype: bfloat16
+
+  jbb:
+    enabled: true
+    hf_path: JailbreakBench/JBB-Behaviors
+    benign: true            # 100 benign twins -> over-refusal
+    artifacts:              # transfer attacks: official JBB artifacts (fetched from GitHub)
+      - {method: PAIR, model_name: vicuna-13b-v1.5}     # 82/100 behaviors have a prompt
+      - {method: GCG, model_name: llama-2-7b-chat-hf}   # white-box suffixes, transferred
+    require_non_refusal: false
+    judge:
+      type: llama_guard
+      model: meta-llama/Llama-Guard-3-8B
+      backend: vllm
+      dtype: bfloat16
+
+  xstest:
+    enabled: true
+    # csv_url defaults to the official CSV on GitHub (the HF mirror walledai/XSTest is gated)
+
+  mmlu:
+    enabled: true
+    tasks: [mmlu]
+    num_fewshot: 5
+    batch_size: auto
+    dtype: bfloat16
+    limit: null

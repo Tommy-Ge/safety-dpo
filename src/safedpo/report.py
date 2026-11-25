@@ -1,0 +1,205 @@
+"""Aggregate ``results/<tag>/metrics.json`` into Markdown tables + a figure, and optionally
+write them into README.md between ``<!-- RESULTS:START -->`` and ``<!-- RESULTS:END -->``.
+
+Every number in the generated tables comes from metrics.json; nothing is hard-coded.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+from pathlib import Path
+
+from .eval.metrics import relative_reduction
+
+log = logging.getLogger(__name__)
+START, END = "<!-- RESULTS:START -->", "<!-- RESULTS:END -->"
+
+
+def _pct(x, digits=1) -> str:
+    return "–" if x is None else f"{100 * x:.{digits}f}"
+
+
+def _get(m: dict, *path):
+    for p in path:
+        if not isinstance(m, dict) or p not in m:
+            return None
+        m = m[p]
+    return m
+
+
+def _rate(m, *path):
+    v = _get(m, *path)
+    return v["rate"] if isinstance(v, dict) else v
+
+
+MAIN_COLUMNS = [
+    ("HarmBench Direct ↓", lambda m: _rate(m, "harmbench", "asr_direct"), "asr"),
+    ("HarmBench Held-out Templates ↓", lambda m: _rate(m, "harmbench", "asr_template_avg"), "asr"),
+    ("HarmBench Any-Template ↓", lambda m: _rate(m, "harmbench", "asr_template_any"), "asr"),
+    ("JBB Direct ↓", lambda m: _rate(m, "jbb", "asr_direct"), "asr"),
+    ("JBB Transfer (PAIR/GCG) ↓", lambda m: _rate(m, "jbb", "asr_artifact_avg"), "asr"),
+    ("Avg ASR ↓", lambda m: m.get("asr_overall_avg"), "asr"),
+    ("XSTest Over-refusal ↓", lambda m: _rate(m, "xstest", "over_refusal_safe"), "util"),
+    ("JBB Benign Refusal ↓", lambda m: _rate(m, "jbb", "benign_refusal"), "util"),
+    ("MMLU (5-shot) ↑", lambda m: _get(m, "mmlu", "mmlu", "acc"), "util"),
+]
+
+
+def load_metrics(results_dir: Path, tags: list[str]) -> dict[str, dict]:
+    out = {}
+    for t in tags:
+        f = results_dir / t / "metrics.json"
+        if f.exists():
+            out[t] = json.loads(f.read_text())
+        else:
+            log.warning("missing %s", f)
+    return out
+
+
+def main_table(ms: dict[str, dict]) -> str:
+    tags = list(ms)
+    cols = [c for c in MAIN_COLUMNS if any(c[1](m) is not None for m in ms.values())]
+    lines = ["| Model | " + " | ".join(c[0] for c in cols) + " |", "|---|" + "---|" * len(cols)]
+    for t in tags:
+        lines.append(f"| {t} | " + " | ".join(_pct(c[1](ms[t])) for c in cols) + " |")
+    if len(tags) >= 2:
+        base, new = ms[tags[0]], ms[tags[-1]]
+        cells = []
+        for _, fn, kind in cols:
+            b, a = fn(base), fn(new)
+            if b is None or a is None:
+                cells.append("–")
+            elif kind == "asr":
+                rr = relative_reduction(b, a)
+                cells.append("–" if rr is None else f"**{-100 * rr:+.0f}%** rel.".replace("-", "−"))
+            else:
+                cells.append(f"{100 * (a - b):+.1f} pt")
+        lines.append(f"| Δ {tags[-1]} vs {tags[0]} | " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
+def attack_table(ms: dict[str, dict]) -> str:
+    rows = []
+    for bench in ("harmbench", "jbb"):
+        attacks = []
+        for m in ms.values():
+            for a in _get(m, bench, "by_attack") or {}:
+                if a not in attacks:
+                    attacks.append(a)
+        for a in attacks:
+            cells = []
+            for m in ms.values():
+                v = _get(m, bench, "by_attack", a)
+                cells.append(
+                    "–" if v is None else f"{_pct(v['rate'])} [{_pct(v['ci95'][0])}, {_pct(v['ci95'][1])}]"
+                )
+            rows.append(f"| {bench} | {a} | " + " | ".join(cells) + " |")
+    head = "| Benchmark | Attack | " + " | ".join(ms) + " |\n|---|---|" + "---|" * len(ms)
+    return head + "\n" + "\n".join(rows)
+
+
+def category_table(ms: dict[str, dict]) -> str:
+    cats = []
+    for m in ms.values():
+        for c in _get(m, "harmbench", "asr_direct_by_category") or {}:
+            if c not in cats:
+                cats.append(c)
+    if not cats:
+        return ""
+    head = "| HarmBench category (direct) | " + " | ".join(ms) + " |\n|---|" + "---|" * len(ms)
+    rows = [
+        f"| {c} | "
+        + " | ".join(_pct(_rate(m, "harmbench", "asr_direct_by_category", c)) for m in ms.values())
+        + " |"
+        for c in cats
+    ]
+    return head + "\n" + "\n".join(rows)
+
+
+def headline(ms: dict[str, dict]) -> str:
+    tags = list(ms)
+    if len(tags) < 2:
+        return ""
+    base, new = ms[tags[0]], ms[tags[-1]]
+    parts = []
+    b, a = base.get("asr_overall_avg"), new.get("asr_overall_avg")
+    rr = relative_reduction(b, a)
+    if rr is not None:
+        parts.append(
+            f"平均越狱成功率（所有攻击设置）从 **{_pct(b)}%** 降到 **{_pct(a)}%**，相对降低 **{100 * rr:.0f}%**"
+        )
+    mb, ma = _get(base, "mmlu", "mmlu", "acc"), _get(new, "mmlu", "mmlu", "acc")
+    if mb is not None and ma is not None:
+        parts.append(
+            f"MMLU 从 {_pct(mb)} 变为 {_pct(ma)}（{100 * (ma - mb):+.1f} pt，相对 {100 * (ma - mb) / mb:+.2f}%）"
+        )
+    xb, xa = _rate(base, "xstest", "over_refusal_safe"), _rate(new, "xstest", "over_refusal_safe")
+    if xb is not None and xa is not None:
+        parts.append(f"XSTest 过度拒答率 {_pct(xb)}% → {_pct(xa)}%")
+    return "；".join(parts) + "。" if parts else ""
+
+
+def plot(ms: dict[str, dict], path: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    attacks = []
+    for m in ms.values():
+        for bench in ("harmbench", "jbb"):
+            for a in _get(m, bench, "by_attack") or {}:
+                if (bench, a) not in attacks:
+                    attacks.append((bench, a))
+    if not attacks:
+        return
+    fig, ax = plt.subplots(figsize=(max(6, 1.1 * len(attacks)), 3.6))
+    width = 0.8 / len(ms)
+    for i, (tag, m) in enumerate(ms.items()):
+        vals = [100 * (_rate(m, b, "by_attack", a) or 0) for b, a in attacks]
+        ax.bar([x + i * width for x in range(len(attacks))], vals, width, label=tag)
+    ax.set_xticks([x + width * (len(ms) - 1) / 2 for x in range(len(attacks))])
+    ax.set_xticklabels(
+        [f"{b}\n{a.split(':', 1)[-1]}" for b, a in attacks], fontsize=7, rotation=30, ha="right"
+    )
+    ax.set_ylabel("Attack success rate (%)")
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.legend(frameon=False)
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+
+
+def build_report(results_dir: str, tags: list[str], readme: str | None = None) -> str:
+    rd = Path(results_dir)
+    ms = load_metrics(rd, tags)
+    if not ms:
+        raise SystemExit(f"no metrics.json found under {rd} for tags {tags}")
+    plot(ms, rd / "asr_by_attack.png")
+    md = "\n\n".join(
+        s
+        for s in [
+            headline(ms),
+            "### 主结果（%）\n\n" + main_table(ms),
+            "### 各攻击设置的 ASR（%，括号内为 95% Wilson 置信区间）\n\n" + attack_table(ms),
+            category_table(ms) and "### HarmBench 各语义类别（直接请求，ASR %）\n\n" + category_table(ms),
+            f"![ASR by attack]({rd.as_posix()}/asr_by_attack.png)",
+        ]
+        if s
+    )
+    (rd / "summary.md").write_text(md + "\n", encoding="utf-8")
+    if readme:
+        p = Path(readme)
+        text = p.read_text(encoding="utf-8")
+        if START in text and END in text:
+            text = re.sub(
+                re.escape(START) + r".*?" + re.escape(END), f"{START}\n{md}\n{END}", text, flags=re.S
+            )
+            p.write_text(text, encoding="utf-8")
+            log.info("updated %s", p)
+        else:
+            log.warning("README has no %s / %s markers; not updated", START, END)
+    return md

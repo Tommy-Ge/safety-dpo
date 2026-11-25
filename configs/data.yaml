@@ -1,0 +1,59 @@
+# Preference-data construction (safedpo build-data)
+seed: 42
+work_dir: data/work          # intermediate files (contain unsafe model outputs - never commit)
+out_dir: data/processed      # train.jsonl / test.jsonl / stats.json
+
+policy:                      # the model being aligned; samples are on-policy
+  model: meta-llama/Meta-Llama-3-8B-Instruct
+  backend: vllm              # hf also works, ~10x slower
+  dtype: bfloat16
+  max_model_len: 4096
+  gpu_memory_utilization: 0.85
+
+judge:                       # labels every sampled response safe / unsafe
+  type: llama_guard
+  model: meta-llama/Llama-Guard-3-8B
+  backend: vllm
+  dtype: bfloat16
+
+sources:
+  harmful:                   # prompts where >=1 human-annotated response was unsafe
+    - name: pku_saferlhf
+      hf_path: PKU-Alignment/PKU-SafeRLHF
+      split: train
+      max_prompts: 4000
+  borderline:                # benign prompts that *look* harmful -> teach "don't over-refuse"
+    - name: or_bench
+      hf_path: bench-llm/or-bench
+      hf_config: or-bench-80k
+      split: train
+      max_prompts: 1500
+  general:                   # ordinary instructions -> preserve helpfulness / MMLU
+    - name: alpaca
+      hf_path: tatsu-lab/alpaca
+      split: train
+      max_prompts: 800
+
+jailbreak_augment:           # add wrapped copies of a fraction of harmful prompts
+  fraction: 0.6
+  families: [roleplay, fiction, prefix_injection, refusal_suppression, authority, hypothetical]
+
+sampling:
+  n: 4                       # on-policy samples per prompt
+  temperature: 1.0
+  top_p: 0.95
+  ref_temperature: 0.7       # system-prompted reference sample
+  max_new_tokens: 512
+
+pairing:
+  chosen_fallback: template              # template | skip
+  rejected_fallback_harmful: offline     # offline (PKU annotated unsafe response) | skip
+  rejected_fallback_benign: template     # template | skip
+  mix: {harmful: 0.6, borderline: 0.25, general: 0.15}
+  max_pairs: 6000
+  test_fraction: 0.05
+
+decontaminate:               # drop training prompts overlapping HarmBench / JBB / XSTest
+  enabled: true
+  ngram: 8
+  threshold: 0.5

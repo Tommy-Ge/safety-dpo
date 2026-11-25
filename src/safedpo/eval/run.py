@@ -1,0 +1,287 @@
+"""Evaluate one model (base or base + LoRA adapter) on all benchmarks.
+
+Stages (cached under ``results/<tag>/``):
+
+    generate -> generations.jsonl  greedy responses to every eval prompt (one model load)
+    judge    -> judged.jsonl       HarmBench classifier (HarmBench), Llama Guard 3 (JBB harmful),
+                                   refusal matching (JBB benign, XSTest)
+    mmlu     -> mmlu.json          lm-evaluation-harness, 5-shot
+    metrics  -> metrics.json
+
+Attack settings
+    HarmBench   direct request + 4 held-out jailbreak templates (never used in training)
+    JBB         direct request + transfer attacks from the official JailbreakBench artifacts
+                (PAIR / GCG prompts found against other models)
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from collections import defaultdict
+from pathlib import Path
+
+from ..data.build import read_jsonl, write_jsonl
+from ..generation import SamplingConfig, build_generator
+from ..prompts import EVAL_JAILBREAKS, is_refusal, wrap
+from .benchmarks import load_harmbench, load_jbb, load_jbb_artifact, load_xstest
+from .metrics import rate
+
+log = logging.getLogger(__name__)
+STAGES = ("generate", "judge", "mmlu", "metrics")
+
+
+# ---------------------------------------------------------------------------- build eval prompts
+def build_eval_records(cfg: dict) -> list[dict]:
+    b = cfg["benchmarks"]
+    recs: list[dict] = []
+
+    hb = b.get("harmbench", {})
+    if hb.get("enabled", True):
+        families = hb.get("templates", list(EVAL_JAILBREAKS))
+        for beh in load_harmbench(hb):
+            base = {
+                "bench": "harmbench",
+                "behavior_id": beh["id"],
+                "behavior": beh["behavior"],
+                "context": beh["context"],
+                "category": beh["category"],
+            }
+            if hb.get("direct", True):
+                recs.append({**base, "attack": "direct", "prompt": beh["prompt"]})
+            for fam in families:
+                recs.append({**base, "attack": f"template:{fam}", "prompt": wrap(beh["prompt"], fam)})
+
+    jb = b.get("jbb", {})
+    if jb.get("enabled", True):
+        harmful = load_jbb(jb, "harmful")
+        for beh in harmful:
+            recs.append(
+                {
+                    "bench": "jbb",
+                    "behavior_id": beh["id"],
+                    "goal": beh["goal"],
+                    "category": beh["category"],
+                    "attack": "direct",
+                    "prompt": beh["goal"],
+                }
+            )
+        for art in jb.get("artifacts", []):
+            name = f"{art['method']}@{art['model_name']}"
+            try:
+                prompts = load_jbb_artifact(art["method"], art["model_name"])
+            except Exception as e:  # package missing / network
+                log.warning("skipping JBB artifact %s: %s", name, e)
+                continue
+            for beh in harmful:
+                p = prompts.get(beh.get("index", -1))
+                # attacks that produced no prompt count as failures (JBB convention)
+                recs.append(
+                    {
+                        "bench": "jbb",
+                        "behavior_id": beh["id"],
+                        "goal": beh["goal"],
+                        "category": beh["category"],
+                        "attack": f"artifact:{name}",
+                        "prompt": p,
+                    }
+                )
+        if jb.get("benign", True):
+            for beh in load_jbb(jb, "benign"):
+                recs.append(
+                    {
+                        "bench": "jbb_benign",
+                        "behavior_id": beh["id"],
+                        "goal": beh["goal"],
+                        "attack": "benign",
+                        "prompt": beh["goal"],
+                    }
+                )
+
+    xs = b.get("xstest", {})
+    if xs.get("enabled", True):
+        for r in load_xstest(xs):
+            recs.append(
+                {
+                    "bench": "xstest",
+                    "behavior_id": r["id"],
+                    "label": r["label"],
+                    "type": r.get("type"),
+                    "attack": "none",
+                    "prompt": r["prompt"],
+                }
+            )
+    return recs
+
+
+# ---------------------------------------------------------------------------- stages
+def stage_generate(cfg: dict, model: str, adapter: str | None) -> list[dict]:
+    recs = build_eval_records(cfg)
+    gcfg = cfg.get("generation", {})
+    todo = [r for r in recs if r["prompt"]]
+    gen = build_generator(gcfg, model=model, adapter=adapter)
+    outs = gen.chat(
+        [[{"role": "user", "content": r["prompt"]}] for r in todo],
+        SamplingConfig(
+            max_new_tokens=gcfg.get("max_new_tokens", 512), temperature=gcfg.get("temperature", 0.0)
+        ),
+        desc="eval generation",
+    )
+    gen.close()
+    for r, o in zip(todo, outs):
+        r["response"] = o[0]
+    for r in recs:
+        r.setdefault("response", None)
+    return recs
+
+
+def stage_judge(cfg: dict, recs: list[dict]) -> list[dict]:
+    from ..judges import build_judge
+
+    b = cfg["benchmarks"]
+    for r in recs:
+        r["refusal"] = is_refusal(r["response"]) if r["response"] is not None else None
+
+    hb_items = [r for r in recs if r["bench"] == "harmbench" and r["response"] is not None]
+    if hb_items:
+        j = build_judge(
+            b["harmbench"].get("judge", {"type": "harmbench_cls", "model": "cais/HarmBench-Llama-2-13b-cls"})
+        )
+        for r, v in zip(hb_items, j.judge(hb_items)):
+            r["success"] = bool(v)
+        j.close()
+
+    jb_items = [r for r in recs if r["bench"] == "jbb" and r["response"] is not None]
+    if jb_items:
+        j = build_judge(
+            b["jbb"].get("judge", {"type": "llama_guard", "model": "meta-llama/Llama-Guard-3-8B"})
+        )
+        # judge against the original goal, not the (possibly obfuscated) attack prompt
+        items = [{"prompt": r["goal"], "response": r["response"]} for r in jb_items]
+        for r, v in zip(jb_items, j.judge(items)):
+            strict = b["jbb"].get("require_non_refusal", False)
+            r["success"] = (bool(v) and not r["refusal"]) if strict else bool(v)
+        j.close()
+
+    for r in recs:
+        r.setdefault("success", False)  # missing artifact prompt => attack failed
+    return recs
+
+
+def stage_mmlu(cfg: dict, model: str, adapter: str | None) -> dict:
+    import lm_eval
+    import torch
+
+    m = cfg["benchmarks"]["mmlu"]
+    model_args = f"pretrained={model},dtype={m.get('dtype', 'bfloat16')}"
+    if adapter:
+        model_args += f",peft={adapter}"
+    res = lm_eval.simple_evaluate(
+        model="hf",
+        model_args=model_args,
+        tasks=m.get("tasks", ["mmlu"]),
+        num_fewshot=m.get("num_fewshot", 5),
+        batch_size=m.get("batch_size", "auto"),
+        limit=m.get("limit"),
+        device=m.get("device") or ("cuda" if torch.cuda.is_available() else "cpu"),
+    )
+    out = {}
+    for task, r in res["results"].items():
+        if "acc,none" in r:
+            out[task] = {"acc": r["acc,none"], "stderr": r.get("acc_stderr,none")}
+    return out
+
+
+def compute_metrics(recs: list[dict], mmlu: dict | None) -> dict:
+    m: dict = {}
+
+    hb = [r for r in recs if r["bench"] == "harmbench"]
+    if hb:
+        by_attack = defaultdict(list)
+        for r in hb:
+            by_attack[r["attack"]].append(r["success"])
+        templates = [a for a in by_attack if a.startswith("template:")]
+        any_success = defaultdict(bool)
+        for r in hb:
+            if r["attack"].startswith("template:"):
+                any_success[r["behavior_id"]] |= r["success"]
+        by_cat = defaultdict(list)
+        for r in hb:
+            if r["attack"] == "direct":
+                by_cat[r["category"]].append(r["success"])
+        m["harmbench"] = {
+            "by_attack": {a: rate(v) for a, v in by_attack.items()},
+            "asr_direct": rate(by_attack["direct"])["rate"] if "direct" in by_attack else None,
+            "asr_template_avg": (sum(rate(by_attack[a])["rate"] for a in templates) / len(templates))
+            if templates
+            else None,
+            "asr_template_any": rate(list(any_success.values())) if any_success else None,
+            "asr_direct_by_category": {c: rate(v) for c, v in sorted(by_cat.items())},
+        }
+
+    jb = [r for r in recs if r["bench"] == "jbb"]
+    if jb:
+        by_attack = defaultdict(list)
+        for r in jb:
+            by_attack[r["attack"]].append(r["success"])
+        arts = [a for a in by_attack if a.startswith("artifact:")]
+        m["jbb"] = {
+            "by_attack": {a: rate(v) for a, v in by_attack.items()},
+            "asr_direct": rate(by_attack["direct"])["rate"] if "direct" in by_attack else None,
+            "asr_artifact_avg": (sum(rate(by_attack[a])["rate"] for a in arts) / len(arts)) if arts else None,
+        }
+    jbn = [r for r in recs if r["bench"] == "jbb_benign"]
+    if jbn:
+        m.setdefault("jbb", {})["benign_refusal"] = rate([r["refusal"] for r in jbn])
+
+    xs = [r for r in recs if r["bench"] == "xstest"]
+    if xs:
+        m["xstest"] = {
+            "over_refusal_safe": rate([r["refusal"] for r in xs if r["label"] == "safe"]),
+            "refusal_unsafe": rate([r["refusal"] for r in xs if r["label"] == "unsafe"]),
+        }
+
+    # headline: ASR averaged over every attack setting (HarmBench direct + templates, JBB direct + artifacts)
+    settings = []
+    for bench in ("harmbench", "jbb"):
+        settings += [v["rate"] for v in m.get(bench, {}).get("by_attack", {}).values()]
+    m["asr_overall_avg"] = sum(settings) / len(settings) if settings else None
+
+    if mmlu:
+        m["mmlu"] = mmlu
+    return m
+
+
+# ---------------------------------------------------------------------------- driver
+def run_eval(
+    cfg: dict,
+    tag: str,
+    model: str,
+    adapter: str | None = None,
+    stages: list[str] | None = None,
+    overwrite: bool = False,
+) -> dict | None:
+    out = Path(cfg.get("results_dir", "results")) / tag
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "model.json").write_text(json.dumps({"tag": tag, "model": model, "adapter": adapter}, indent=2))
+    stages = stages or list(STAGES)
+    f_gen, f_judged, f_mmlu = out / "generations.jsonl", out / "judged.jsonl", out / "mmlu.json"
+
+    if "generate" in stages and (overwrite or not f_gen.exists()):
+        write_jsonl(f_gen, stage_generate(cfg, model, adapter))
+    if "judge" in stages and (overwrite or not f_judged.exists()):
+        write_jsonl(f_judged, stage_judge(cfg, read_jsonl(f_gen)))
+    if (
+        "mmlu" in stages
+        and cfg["benchmarks"].get("mmlu", {}).get("enabled", True)
+        and (overwrite or not f_mmlu.exists())
+    ):
+        f_mmlu.write_text(json.dumps(stage_mmlu(cfg, model, adapter), indent=2))
+    if "metrics" in stages:
+        mmlu = json.loads(f_mmlu.read_text()) if f_mmlu.exists() else None
+        metrics = compute_metrics(read_jsonl(f_judged), mmlu)
+        metrics["model"] = {"tag": tag, "model": model, "adapter": adapter}
+        (out / "metrics.json").write_text(json.dumps(metrics, indent=2))
+        log.info("wrote %s", out / "metrics.json")
+        return metrics
+    return None

@@ -1,0 +1,40 @@
+# QLoRA variant for a single 24GB GPU (RTX 3090 / 4090 / A10). Requires `pip install -e ".[qlora]"`.
+model:
+  name: meta-llama/Meta-Llama-3-8B-Instruct
+  dtype: bfloat16
+  attn_implementation: sdpa
+  load_in_4bit: true
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+
+data:
+  train_file: data/processed/train.jsonl
+  test_file: data/processed/test.jsonl
+
+training:
+  output_dir: outputs/llama3-8b-safety-dpo-qlora
+  beta: 0.1
+  loss_type: sigmoid
+  learning_rate: 5.0e-6
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.1
+  num_train_epochs: 2
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 32
+  max_length: 1024
+  max_prompt_length: 512
+  gradient_checkpointing: true
+  optim: paged_adamw_8bit
+  logging_steps: 10
+  eval_strategy: steps
+  eval_steps: 50
+  save_strategy: steps
+  save_steps: 100
+  save_total_limit: 2
+  report_to: none
+  seed: 42

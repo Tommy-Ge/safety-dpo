@@ -1,0 +1,14 @@
+# CPU smoke test: tiny random model + keyword judge + local fixtures. Checks the plumbing, not quality.
+seed: 0
+work_dir: smoke_out/data/work
+out_dir: smoke_out/data/processed
+policy: {model: trl-internal-testing/tiny-LlamaForCausalLM-3.2, backend: hf, dtype: float32, batch_size: 8}
+judge: {type: keyword}
+sources:
+  harmful: [{name: harmful_fixture, loader: jsonl, path: tests/fixtures/harmful.jsonl}]
+  borderline: [{name: borderline_fixture, loader: jsonl, path: tests/fixtures/borderline.jsonl}]
+  general: [{name: general_fixture, loader: jsonl, path: tests/fixtures/general.jsonl}]
+jailbreak_augment: {fraction: 0.5}
+sampling: {n: 2, temperature: 1.0, top_p: 0.95, max_new_tokens: 16}
+pairing: {max_pairs: null, test_fraction: 0.2}
+decontaminate: {enabled: true, ngram: 6, threshold: 0.5}

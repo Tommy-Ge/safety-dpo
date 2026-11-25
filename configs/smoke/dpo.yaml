@@ -1,0 +1,19 @@
+model: {name: trl-internal-testing/tiny-LlamaForCausalLM-3.2, dtype: float32}
+lora: {r: 4, alpha: 8, dropout: 0.0, target_modules: [q_proj, v_proj]}
+data: {train_file: smoke_out/data/processed/train.jsonl, test_file: smoke_out/data/processed/test.jsonl}
+training:
+  output_dir: smoke_out/outputs/tiny-dpo
+  beta: 0.1
+  learning_rate: 1.0e-4
+  num_train_epochs: 1
+  max_steps: 3
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 2
+  gradient_accumulation_steps: 1
+  max_length: 256
+  max_prompt_length: 128
+  logging_steps: 1
+  eval_strategy: "no"
+  save_strategy: "no"
+  report_to: none
+  seed: 0

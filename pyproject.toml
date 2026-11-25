@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "safedpo"
+version = "0.1.0"
+description = "Safety alignment of Llama-3-8B-Instruct with LoRA + DPO on self-constructed on-policy safe/unsafe preference pairs, evaluated on HarmBench, JailbreakBench, XSTest and MMLU."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.3",
+  "transformers>=4.46",
+  "trl>=0.13",
+  "peft>=0.13",
+  "accelerate>=1.0",
+  "datasets>=3.0",
+  "pyyaml>=6.0",
+  "pandas>=2.1",
+  "numpy>=1.26",
+  "matplotlib>=3.8",
+  "tqdm>=4.66",
+  "requests>=2.31",
+]
+
+[project.optional-dependencies]
+# Fast generation for data construction / evaluation (Linux + CUDA only)
+vllm = ["vllm>=0.6"]
+# 4-bit QLoRA on 24GB GPUs
+qlora = ["bitsandbytes>=0.43"]
+# MMLU via lm-evaluation-harness
+eval = ["lm-eval>=0.4.5"]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+safedpo = "safedpo.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/safedpo"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501", "B905"]
