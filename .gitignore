@@ -16,5 +16,6 @@ results/*/judged.jsonl
 outputs/
 wandb/
 smoke_out/
+runs/
 
 .DS_Store

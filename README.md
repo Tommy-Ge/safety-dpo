@@ -88,11 +88,44 @@ huggingface-cli login                      # Llama-3 和 Llama Guard 3 需要先
 ### 不需要 GPU 的检查
 
 ```bash
-make test     # 34 个单元测试：配对规则、去污染、指标、报告
+make test     # 37 个单元测试：配对规则、去污染、指标、报告
 make smoke    # 用 tiny 随机模型在 CPU 上跑通 构造数据 → DPO → 评测 → 报告（只验证流程，不代表效果）
+SMOKE=1 bash scripts/run_gpu.sh   # 在 CPU 上预演下面的 GPU 一键脚本（CI 每次都会跑）
 ```
 
-### 完整流程（单张 80GB GPU）
+### 在云 GPU 上一键复现（推荐）
+
+`scripts/run_gpu.sh` 把整条流程串成一个命令：
+
+- **可断点续跑**：每完成一步会在 `runs/<run>/logs/` 留下 `.done` 标记。实例被中断或关机后，重跑同一条命令就会跳过已完成的步骤。
+- **一个进程只加载一个模型**：策略模型、Llama Guard、HarmBench 分类器分别在独立进程里加载，避免 vLLM 在同一进程反复初始化出问题。
+- **自动打包结果**：跑完后生成 `runs/full/bundle.tar.gz`，包含指标、图、更新后的 README、数据统计和训练日志，**不含**任何模型生成文本。下载到本地，在仓库根目录解压后提交即可。
+
+```bash
+# 1) 先在 Hugging Face 申请 Meta-Llama-3-8B-Instruct 和 Llama-Guard-3-8B 的访问权限，然后：
+git clone https://github.com/Tommy-Ge/safety-dpo && cd safety-dpo
+pip install -e ".[vllm,eval,dev]"
+huggingface-cli login
+
+# 2) 小样本试跑（约 20–40 分钟）：用几十条数据把 数据构造 → 训练 → 全部评测 → 报告 走一遍，先排除环境问题
+QUICK=1 bash scripts/run_gpu.sh
+
+# 3) 正式运行（建议放在 tmux / screen 里）
+bash scripts/run_gpu.sh
+
+# 4) 本地：解压结果并提交
+tar xzf bundle.tar.gz && git add README.md results data/processed/stats.json && git commit -m "Results" && git push
+```
+
+| 显卡 | 用法 | 说明 |
+|---|---|---|
+| A100 / A800 / H100 80GB | `bash scripts/run_gpu.sh` | 推荐；bf16 LoRA |
+| A100 40GB / L40S 48GB | 同上 | 一般够用；训练时如果 OOM，加 `-o training.per_device_train_batch_size=2 -o training.gradient_accumulation_steps=16` |
+| RTX 4090 / 3090 24GB | `QLORA=1 bash scripts/run_gpu.sh` | 4-bit QLoRA 训练；显存不足 40GB 时脚本会自动把 13B 的 HarmBench 分类器改用 fp8 加载。如果你的 vLLM 版本或显卡不支持 fp8，评测这一步就换一张 40GB 以上的卡 |
+
+国内平台（如 AutoDL）：脚本检测到 `/etc/network_turbo` 时会自动开启学术加速，以便访问 GitHub 和 Hugging Face。也可以设置 `export HF_ENDPOINT=https://hf-mirror.com`，gated 模型仍然需要先登录。整个流程的大头是数据构造时的采样、两次完整评测和 MMLU。具体耗时取决于显卡和网速，第一次跑之前先用 `QUICK=1` 看看每一步大概要多久。
+
+### 分步运行（单张 80GB GPU）
 
 ```bash
 make data        # 构造偏好数据 → data/processed/{train,test}.jsonl + stats.json
@@ -114,7 +147,7 @@ safedpo build-data -o pairing.mix.borderline=0 -o pairing.mix.general=0   # 消�
 ## 结果
 
 <!-- RESULTS:START -->
-> 还没有在 GPU 上跑出结果。按上面的完整流程跑完后执行 `make report`，这里会自动填入主结果表（各基准 ASR、过度拒答率、MMLU，以及相对基座的变化）、各攻击设置的 ASR 及 95% 置信区间、HarmBench 分类别结果和柱状图。
+> 还没有在 GPU 上跑出结果。运行 `bash scripts/run_gpu.sh`（或分步运行后执行 `make report`）后，这里会自动填入：主结果表（各基准 ASR、过度拒答率、MMLU，以及相对基座的变化）、各攻击设置的 ASR 及 95% 置信区间、HarmBench 分类别结果、构造出的偏好数据统计和训练曲线。
 <!-- RESULTS:END -->
 
 ### 建议的消融
@@ -149,12 +182,13 @@ src/safedpo/
   eval/benchmarks.py         HarmBench / JBB（含 artifacts） / XSTest 加载
   eval/run.py                generate → judge → mmlu → metrics
   report.py                  表格、图，写回 README
+scripts/run_gpu.sh           云 GPU 一键复现（断点续跑、小样本试跑、结果打包）
 tests/                       单元测试 + fixtures
 ```
 
 ## 负责任使用
 
-- `data/work/`、`data/processed/*.jsonl`、`results/*/generations.jsonl` 里有模型生成的不安全文本，都已写进 `.gitignore`，**不要公开上传**。仓库只提交指标文件。
+- `data/work/`、`data/processed/*.jsonl`、`results/*/generations.jsonl`、`results/*/judged.jsonl` 里有模型生成的不安全文本，都已写进 `.gitignore`，**不要公开上传**。仓库只提交指标文件。
 - 越狱模板都是公开越狱手法的简短改写，只用于训练和评测防御。
 
 ## 局限

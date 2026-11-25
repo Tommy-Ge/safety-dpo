@@ -23,10 +23,14 @@ def apply_overrides(cfg: dict, overrides: list[str] | None) -> dict:
         node = cfg
         parts = key.strip().split(".")
         for p in parts[:-1]:
-            node = node.setdefault(p, {})
-            if not isinstance(node, dict):
-                raise ValueError(f"cannot descend into non-dict at {p!r} in {key!r}")
-        node[parts[-1]] = _parse_scalar(value)
+            node = node[int(p)] if isinstance(node, list) else node.setdefault(p, {})
+            if not isinstance(node, (dict, list)):
+                raise ValueError(f"cannot descend into scalar at {p!r} in {key!r}")
+        last = parts[-1]
+        if isinstance(node, list):
+            node[int(last)] = _parse_scalar(value)
+        else:
+            node[last] = _parse_scalar(value)
     return cfg
 
 

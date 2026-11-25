@@ -44,6 +44,7 @@ class Generator:
         gpu_memory_utilization: float = 0.85,
         max_lora_rank: int = 64,
         seed: int = 0,
+        quantization: str | None = None,
     ):
         self.model_name = model
         self.adapter = adapter
@@ -72,6 +73,7 @@ class Generator:
                 enable_lora=adapter is not None,
                 max_lora_rank=max_lora_rank,
                 seed=seed,
+                quantization=quantization,  # e.g. "fp8" to fit the 13B HarmBench judge on a 24GB GPU
             )
             self._lora = None
             if adapter:
@@ -145,7 +147,14 @@ class Generator:
     def _complete_vllm(self, prompts: list[str], s: SamplingConfig) -> list[list[str]]:
         from vllm import SamplingParams
 
+        # Llama-3 ends a turn with <|eot_id|>; stop on it even if the vLLM version ignores generation_config
+        stop_ids = {self.tokenizer.eos_token_id}
+        for t in ("<|eot_id|>", "<|end_of_text|>"):
+            tid = self.tokenizer.convert_tokens_to_ids(t)
+            if isinstance(tid, int) and tid != self.tokenizer.unk_token_id:
+                stop_ids.add(tid)
         params = SamplingParams(
+            stop_token_ids=sorted(i for i in stop_ids if i is not None),
             n=s.n,
             temperature=s.temperature,
             top_p=s.top_p if s.temperature > 0 else 1.0,
@@ -203,4 +212,5 @@ def build_generator(
         gpu_memory_utilization=cfg.get("gpu_memory_utilization", 0.85),
         max_lora_rank=cfg.get("max_lora_rank", 64),
         seed=seed,
+        quantization=cfg.get("quantization"),
     )

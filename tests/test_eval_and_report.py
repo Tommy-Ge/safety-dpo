@@ -90,3 +90,43 @@ def test_report_end_to_end(tmp_path):
     text = readme.read_text()
     assert "\nold\n" not in text and "intro" in text and "outro" in text and "−75%" in text
     assert (tmp_path / "asr_by_attack.png").exists()
+
+
+def test_list_index_override():
+    cfg = apply_overrides(
+        {"sources": {"harmful": [{"max_prompts": 10}]}}, ["sources.harmful.0.max_prompts=3"]
+    )
+    assert cfg["sources"]["harmful"][0]["max_prompts"] == 3
+
+
+def test_judge_one_benchmark_per_call(tmp_path):
+    from safedpo.data.build import write_jsonl
+    from safedpo.eval.run import build_eval_records, run_eval
+
+    cfg = {
+        "results_dir": str(tmp_path),
+        "benchmarks": {
+            **{k: {**v, "judge": {"type": "keyword"}} for k, v in SMOKE_EVAL["benchmarks"].items()},
+            "mmlu": {"enabled": False},
+        },
+    }
+    recs = build_eval_records(cfg)
+    for r in recs:
+        r["response"] = "I'm sorry, I can't." if r["bench"] == "jbb" else "Sure, here is how."
+    (tmp_path / "base").mkdir()
+    write_jsonl(tmp_path / "base" / "generations.jsonl", recs)
+
+    run_eval(cfg, "base", "m", stages=["judge"], judge_benches=["harmbench"])
+    with pytest.raises(RuntimeError, match="jbb"):
+        run_eval(cfg, "base", "m", stages=["metrics"])
+    run_eval(cfg, "base", "m", stages=["judge"], judge_benches=["jbb"])
+    m = run_eval(cfg, "base", "m", stages=["metrics"])
+    assert m["harmbench"]["asr_direct"] == 1.0  # kept from the first judge call
+    assert m["jbb"]["asr_direct"] == 0.0
+
+
+def test_eval_limits():
+    cfg = {"benchmarks": {k: {**v, "limit": 2} for k, v in SMOKE_EVAL["benchmarks"].items()}}
+    recs = build_eval_records(cfg)
+    assert len({r["behavior_id"] for r in recs if r["bench"] == "harmbench"}) == 2
+    assert sum(r["bench"] == "xstest" for r in recs) == 2

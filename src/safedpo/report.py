@@ -173,12 +173,75 @@ def plot(ms: dict[str, dict], path: Path) -> None:
     plt.close(fig)
 
 
-def build_report(results_dir: str, tags: list[str], readme: str | None = None) -> str:
+def data_section(stats_path: Path) -> str:
+    st = json.loads(stats_path.read_text())
+
+    def fmt(d: dict) -> str:
+        return "，".join(f"{k} {v}" for k, v in sorted(d.items(), key=lambda kv: -kv[1]))
+
+    rows = [
+        ("训练 / 验证偏好对", f"{st['n_train']} / {st['n_test']}"),
+        ("训练集按类型", fmt(st.get("train_by_kind", {}))),
+        ("chosen 来源", fmt(st.get("chosen_from", {}))),
+        ("rejected 来源", fmt(st.get("rejected_from", {}))),
+        ("有害样本的越狱包装", fmt(st.get("jailbreak_family", {}))),
+        (
+            "基座在训练有害提示上的不安全率（全部 / 带越狱包装）",
+            f"{_pct(st.get('policy_unsafe_rate_on_harmful'))}% / {_pct(st.get('policy_unsafe_rate_on_harmful_jailbreak'))}%",
+        ),
+        ("基座在良性训练提示上的拒答率", f"{_pct(st.get('policy_refusal_rate_on_benign'))}%"),
+    ]
+    return "### 构造出的偏好数据\n\n| 项目 | 值 |\n|---|---|\n" + "\n".join(f"| {k} | {v} |" for k, v in rows)
+
+
+def plot_training(log_path: Path, out: Path) -> bool:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    hist = json.loads(log_path.read_text())
+    panels = [
+        ("loss", "eval_loss", "DPO loss"),
+        ("rewards/margins", "eval_rewards/margins", "reward margin (chosen − rejected)"),
+        ("rewards/accuracies", "eval_rewards/accuracies", "reward accuracy"),
+    ]
+    fig, axes = plt.subplots(1, 3, figsize=(11, 3))
+    drawn = False
+    for ax, (tk, ek, title) in zip(axes, panels):
+        for key, label, style in ((tk, "train", "-"), (ek, "eval", "o--")):
+            pts = [(h["step"], float(h[key])) for h in hist if key in h and "step" in h]
+            if pts:
+                ax.plot(*zip(*pts), style, label=label, markersize=3)
+                drawn = True
+        ax.set_title(title, fontsize=9)
+        ax.set_xlabel("step", fontsize=8)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.legend(frameon=False, fontsize=7)
+    fig.tight_layout()
+    if drawn:
+        fig.savefig(out, dpi=160)
+    plt.close(fig)
+    return drawn
+
+
+def build_report(
+    results_dir: str,
+    tags: list[str],
+    readme: str | None = None,
+    data_stats: str | None = None,
+    train_log: str | None = None,
+) -> str:
     rd = Path(results_dir)
     ms = load_metrics(rd, tags)
     if not ms:
         raise SystemExit(f"no metrics.json found under {rd} for tags {tags}")
     plot(ms, rd / "asr_by_attack.png")
+    extra = []
+    if data_stats and Path(data_stats).exists():
+        extra.append(data_section(Path(data_stats)))
+    if train_log and Path(train_log).exists() and plot_training(Path(train_log), rd / "training_curves.png"):
+        extra.append(f"### 训练曲线\n\n![training curves]({rd.as_posix()}/training_curves.png)")
     md = "\n\n".join(
         s
         for s in [
@@ -187,6 +250,7 @@ def build_report(results_dir: str, tags: list[str], readme: str | None = None) -
             "### 各攻击设置的 ASR（%，括号内为 95% Wilson 置信区间）\n\n" + attack_table(ms),
             category_table(ms) and "### HarmBench 各语义类别（直接请求，ASR %）\n\n" + category_table(ms),
             f"![ASR by attack]({rd.as_posix()}/asr_by_attack.png)",
+            *extra,
         ]
         if s
     )

@@ -4,7 +4,7 @@ TRAIN_CFG ?= configs/dpo_llama3_8b.yaml
 ADAPTER ?= outputs/llama3-8b-safety-dpo/final
 SMOKE_MODEL = trl-internal-testing/tiny-LlamaForCausalLM-3.2
 
-.PHONY: install data train eval-base eval-dpo report all smoke test lint clean-smoke
+.PHONY: install data train eval-base eval-dpo report all gpu gpu-quick smoke test lint clean-smoke
 
 install:
 	$(PY) -m pip install -e ".[vllm,eval,dev]"
@@ -26,9 +26,17 @@ eval-dpo:
 
 # 4. tables + figure, written into README.md
 report:
-	safedpo report --results results --tags base dpo --update-readme README.md
+	safedpo report --results results --tags base dpo --update-readme README.md \
+		--data-stats data/processed/stats.json --train-log outputs/llama3-8b-safety-dpo/log_history.json
 
 all: data train eval-base eval-dpo report
+
+# recommended on a rented GPU: resumable, one vLLM model per process, bundles results at the end
+gpu-quick:
+	QUICK=1 bash scripts/run_gpu.sh
+
+gpu:
+	bash scripts/run_gpu.sh
 
 # CPU-only end-to-end check with a tiny random model (plumbing, not quality)
 smoke:
@@ -45,4 +53,4 @@ lint:
 	ruff check src tests
 
 clean-smoke:
-	rm -rf smoke_out
+	rm -rf smoke_out runs/smoke

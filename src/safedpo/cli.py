@@ -31,6 +31,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--model", required=True)
     p.add_argument("--adapter", default=None, help="path to a LoRA adapter (omit for the base model)")
     p.add_argument("--stages", default="generate,judge,mmlu,metrics")
+    p.add_argument("--judge-benches", default=None, help="e.g. harmbench or jbb (default: all)")
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("-o", "--override", action="append", default=[], metavar="KEY=VALUE")
 
@@ -38,6 +39,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--results", default="results")
     p.add_argument("--tags", nargs="+", default=["base", "dpo"], help="first tag is the baseline")
     p.add_argument("--update-readme", default=None, metavar="README.md")
+    p.add_argument("--data-stats", default=None, metavar="data/processed/stats.json")
+    p.add_argument("--train-log", default=None, metavar="outputs/.../log_history.json")
 
     args = ap.parse_args(argv)
     logging.basicConfig(
@@ -70,13 +73,14 @@ def main(argv: list[str] | None = None) -> None:
             args.adapter,
             stages=[s.strip() for s in args.stages.split(",")],
             overwrite=args.overwrite,
+            judge_benches=args.judge_benches.split(",") if args.judge_benches else None,
         )
         if m:
             print(json.dumps({k: v for k, v in m.items() if k != "model"}, indent=2)[:4000])
     elif args.cmd == "report":
         from .report import build_report
 
-        print(build_report(args.results, args.tags, args.update_readme))
+        print(build_report(args.results, args.tags, args.update_readme, args.data_stats, args.train_log))
 
 
 if __name__ == "__main__":

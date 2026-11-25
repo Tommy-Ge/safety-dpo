@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import json
 import logging
-from collections import defaultdict
+import random
+from collections import Counter, defaultdict
 from pathlib import Path
 
 from ..data.build import read_jsonl, write_jsonl
@@ -29,6 +30,15 @@ from .metrics import rate
 
 log = logging.getLogger(__name__)
 STAGES = ("generate", "judge", "mmlu", "metrics")
+JUDGED_BENCHES = ("harmbench", "jbb")
+
+
+def _limit(rows: list, n: int | None) -> list:
+    """Deterministic subsample (keeps original order); used by the quick GPU check."""
+    if not n or n >= len(rows):
+        return rows
+    keep = set(random.Random(0).sample(range(len(rows)), n))
+    return [r for i, r in enumerate(rows) if i in keep]
 
 
 # ---------------------------------------------------------------------------- build eval prompts
@@ -39,7 +49,7 @@ def build_eval_records(cfg: dict) -> list[dict]:
     hb = b.get("harmbench", {})
     if hb.get("enabled", True):
         families = hb.get("templates", list(EVAL_JAILBREAKS))
-        for beh in load_harmbench(hb):
+        for beh in _limit(load_harmbench(hb), hb.get("limit")):
             base = {
                 "bench": "harmbench",
                 "behavior_id": beh["id"],
@@ -54,7 +64,7 @@ def build_eval_records(cfg: dict) -> list[dict]:
 
     jb = b.get("jbb", {})
     if jb.get("enabled", True):
-        harmful = load_jbb(jb, "harmful")
+        harmful = _limit(load_jbb(jb, "harmful"), jb.get("limit"))
         for beh in harmful:
             recs.append(
                 {
@@ -87,7 +97,7 @@ def build_eval_records(cfg: dict) -> list[dict]:
                     }
                 )
         if jb.get("benign", True):
-            for beh in load_jbb(jb, "benign"):
+            for beh in _limit(load_jbb(jb, "benign"), jb.get("limit")):
                 recs.append(
                     {
                         "bench": "jbb_benign",
@@ -100,7 +110,7 @@ def build_eval_records(cfg: dict) -> list[dict]:
 
     xs = b.get("xstest", {})
     if xs.get("enabled", True):
-        for r in load_xstest(xs):
+        for r in _limit(load_xstest(xs), xs.get("limit")):
             recs.append(
                 {
                     "bench": "xstest",
@@ -135,24 +145,32 @@ def stage_generate(cfg: dict, model: str, adapter: str | None) -> list[dict]:
     return recs
 
 
-def stage_judge(cfg: dict, recs: list[dict]) -> list[dict]:
+def stage_judge(cfg: dict, recs: list[dict], benches: list[str] | None = None) -> list[dict]:
+    """Judge the given benchmarks (default: all). Running one benchmark per process
+    (``--judge-benches harmbench`` then ``--judge-benches jbb``) avoids loading two vLLM
+    judges in the same process; results of earlier calls are kept."""
     from ..judges import build_judge
 
     b = cfg["benchmarks"]
+    benches = list(benches or JUDGED_BENCHES)
     for r in recs:
         r["refusal"] = is_refusal(r["response"]) if r["response"] is not None else None
+        if r["response"] is None:  # missing artifact prompt => attack failed (JBB convention)
+            r["success"], r["judged"] = False, True
+        elif r["bench"] not in JUDGED_BENCHES:  # refusal-only benchmarks
+            r["judged"] = True
 
     hb_items = [r for r in recs if r["bench"] == "harmbench" and r["response"] is not None]
-    if hb_items:
+    if hb_items and "harmbench" in benches:
         j = build_judge(
             b["harmbench"].get("judge", {"type": "harmbench_cls", "model": "cais/HarmBench-Llama-2-13b-cls"})
         )
         for r, v in zip(hb_items, j.judge(hb_items)):
-            r["success"] = bool(v)
+            r["success"], r["judged"] = bool(v), True
         j.close()
 
     jb_items = [r for r in recs if r["bench"] == "jbb" and r["response"] is not None]
-    if jb_items:
+    if jb_items and "jbb" in benches:
         j = build_judge(
             b["jbb"].get("judge", {"type": "llama_guard", "model": "meta-llama/Llama-Guard-3-8B"})
         )
@@ -161,10 +179,8 @@ def stage_judge(cfg: dict, recs: list[dict]) -> list[dict]:
         for r, v in zip(jb_items, j.judge(items)):
             strict = b["jbb"].get("require_non_refusal", False)
             r["success"] = (bool(v) and not r["refusal"]) if strict else bool(v)
+            r["judged"] = True
         j.close()
-
-    for r in recs:
-        r.setdefault("success", False)  # missing artifact prompt => attack failed
     return recs
 
 
@@ -260,6 +276,7 @@ def run_eval(
     adapter: str | None = None,
     stages: list[str] | None = None,
     overwrite: bool = False,
+    judge_benches: list[str] | None = None,
 ) -> dict | None:
     out = Path(cfg.get("results_dir", "results")) / tag
     out.mkdir(parents=True, exist_ok=True)
@@ -267,19 +284,29 @@ def run_eval(
     stages = stages or list(STAGES)
     f_gen, f_judged, f_mmlu = out / "generations.jsonl", out / "judged.jsonl", out / "mmlu.json"
 
-    if "generate" in stages and (overwrite or not f_gen.exists()):
-        write_jsonl(f_gen, stage_generate(cfg, model, adapter))
-    if "judge" in stages and (overwrite or not f_judged.exists()):
-        write_jsonl(f_judged, stage_judge(cfg, read_jsonl(f_gen)))
-    if (
-        "mmlu" in stages
-        and cfg["benchmarks"].get("mmlu", {}).get("enabled", True)
-        and (overwrite or not f_mmlu.exists())
-    ):
+    if "generate" in stages:
+        if overwrite or not f_gen.exists():
+            write_jsonl(f_gen, stage_generate(cfg, model, adapter))
+        else:
+            log.info("reusing %s", f_gen)
+    if "judge" in stages:
+        if f_judged.exists() and not overwrite and judge_benches is None:
+            log.info("reusing %s", f_judged)
+        else:
+            src = f_judged if (f_judged.exists() and not overwrite) else f_gen
+            write_jsonl(f_judged, stage_judge(cfg, read_jsonl(src), judge_benches))
+    mmlu_on = cfg["benchmarks"].get("mmlu", {}).get("enabled", True)
+    if "mmlu" in stages and mmlu_on and (overwrite or not f_mmlu.exists()):
         f_mmlu.write_text(json.dumps(stage_mmlu(cfg, model, adapter), indent=2))
     if "metrics" in stages:
+        recs = read_jsonl(f_judged)
+        missing = Counter(r["bench"] for r in recs if not r.get("judged"))
+        if missing:
+            raise RuntimeError(
+                f"unjudged records {dict(missing)}: run `--stages judge` for these benchmarks first"
+            )
         mmlu = json.loads(f_mmlu.read_text()) if f_mmlu.exists() else None
-        metrics = compute_metrics(read_jsonl(f_judged), mmlu)
+        metrics = compute_metrics(recs, mmlu)
         metrics["model"] = {"tag": tag, "model": model, "adapter": adapter}
         (out / "metrics.json").write_text(json.dumps(metrics, indent=2))
         log.info("wrote %s", out / "metrics.json")

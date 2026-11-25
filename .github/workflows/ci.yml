@@ -11,3 +11,5 @@ jobs:
       - run: pip install --extra-index-url https://download.pytorch.org/whl/cpu -e ".[dev]"
       - run: ruff check src tests
       - run: pytest -q
+      - name: rehearse the GPU script on CPU with a tiny model
+        run: SMOKE=1 bash scripts/run_gpu.sh
