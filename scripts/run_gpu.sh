@@ -5,6 +5,7 @@
 #   bash scripts/run_gpu.sh           # full run; resumable: re-run the same command after any interruption
 #   QLORA=1 bash scripts/run_gpu.sh   # 24GB GPU: QLoRA training + fp8 HarmBench judge
 #   SMOKE=1 bash scripts/run_gpu.sh   # CPU-only rehearsal of this script with a tiny model (CI / laptops)
+#   MAC=1   bash scripts/run_gpu.sh   # laptop-scale run on Apple silicon: Qwen2.5-1.5B + Qwen3Guard (configs/mac)
 #
 # Every finished step leaves runs/<run>/logs/<step>.done; finished steps are skipped on re-run.
 # At the end, runs/<run>/bundle.tar.gz holds everything needed to update the GitHub repo
@@ -16,6 +17,7 @@ BASE=${BASE:-meta-llama/Meta-Llama-3-8B-Instruct}
 QUICK=${QUICK:-0}
 QLORA=${QLORA:-0}
 SMOKE=${SMOKE:-0}
+MAC=${MAC:-0}
 DATA_CFG=configs/data.yaml
 EVAL_CFG=configs/eval.yaml
 export TOKENIZERS_PARALLELISM=false
@@ -34,7 +36,12 @@ else
   OUT_DIR=outputs/llama3-8b-safety-dpo
 fi
 
-if [[ "$SMOKE" == 1 ]]; then
+if [[ "$MAC" == 1 ]]; then
+  BASE=Qwen/Qwen2.5-1.5B-Instruct
+  DATA_CFG=configs/mac/data.yaml; EVAL_CFG=configs/mac/eval.yaml; TRAIN_CFG=configs/mac/dpo.yaml
+  RUN=runs/mac; DATA_DIR=data/mac; OUT_DIR=outputs/qwen2.5-1.5b-safety-dpo; RESULTS=results/mac
+  DATA_O=(); TRAIN_O=(); EVAL_O=(); README_ARG=(--update-readme README.md --marker RESULTS-MAC)
+elif [[ "$SMOKE" == 1 ]]; then
   BASE=trl-internal-testing/tiny-LlamaForCausalLM-3.2
   DATA_CFG=configs/smoke/data.yaml; EVAL_CFG=configs/smoke/eval.yaml; TRAIN_CFG=configs/smoke/dpo.yaml
   RUN=runs/smoke; DATA_DIR=$RUN/data; OUT_DIR=$RUN/outputs/dpo; RESULTS=$RUN/results
@@ -92,7 +99,7 @@ for m in models:
         sys.exit(f"cannot access {m}: {type(e).__name__}. Request access on huggingface.co and run `huggingface-cli login`.")
 PY
 }
-if [[ "$SMOKE" != 1 ]]; then
+if [[ "$SMOKE" != 1 && "$MAC" != 1 ]]; then
   step preflight preflight
   GPU_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1)
 else

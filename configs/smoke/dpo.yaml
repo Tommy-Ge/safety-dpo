@@ -1,4 +1,4 @@
-model: {name: trl-internal-testing/tiny-LlamaForCausalLM-3.2, dtype: float32}
+model: {name: trl-internal-testing/tiny-LlamaForCausalLM-3.2, dtype: float32, device: cpu}
 lora: {r: 4, alpha: 8, dropout: 0.0, target_modules: [q_proj, v_proj]}
 data: {train_file: smoke_out/data/processed/train.jsonl, test_file: smoke_out/data/processed/test.jsonl}
 training:

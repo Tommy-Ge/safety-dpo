@@ -9,8 +9,10 @@ __pycache__/
 # Constructed data and model generations contain unsafe text - never publish them
 data/work/
 data/processed/*.jsonl
-results/*/generations.jsonl
-results/*/judged.jsonl
+data/*/work/
+data/*/processed/*.jsonl
+results/**/generations.jsonl
+results/**/judged.jsonl
 
 # checkpoints / runs
 outputs/
@@ -19,3 +21,4 @@ smoke_out/
 runs/
 
 .DS_Store
+runs_mac.log

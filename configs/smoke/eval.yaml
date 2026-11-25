@@ -1,5 +1,5 @@
 results_dir: smoke_out/results
-generation: {backend: hf, dtype: float32, batch_size: 8, max_new_tokens: 16, temperature: 0.0}
+generation: {backend: hf, dtype: float32, device: cpu, batch_size: 8, max_new_tokens: 16, temperature: 0.0}
 benchmarks:
   harmbench: {enabled: true, behaviors_path: tests/fixtures/harmbench.csv, judge: {type: keyword}}
   jbb: {enabled: true, path: tests/fixtures/jbb.jsonl, artifacts: [], judge: {type: keyword}}

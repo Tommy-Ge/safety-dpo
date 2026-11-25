@@ -1,0 +1,37 @@
+# Evaluation on Apple silicon. The judge (Qwen3Guard-Gen-4B) is larger than, and different from,
+# the 0.6B model that labelled the training data, so the policy is not graded by its own labeler.
+results_dir: results/mac
+
+generation:
+  backend: hf
+  dtype: bfloat16
+  device: auto
+  batch_size: 48
+  max_new_tokens: 256           # HarmBench uses 512; halved for laptop budget
+  temperature: 0.0
+
+benchmarks:
+  harmbench:
+    enabled: true
+    functional_categories: [standard, contextual]
+    direct: true
+    templates: [developer_mode, evil_confidant, text_continuation, translation_pretext]
+    judge: {type: qwen3guard, model: Qwen/Qwen3Guard-Gen-4B, backend: hf, dtype: bfloat16, device: auto, batch_size: 16}
+
+  jbb:
+    enabled: true
+    benign: true
+    artifacts:
+      - {method: PAIR, model_name: vicuna-13b-v1.5}
+      - {method: GCG, model_name: llama-2-7b-chat-hf}
+    judge: {type: qwen3guard, model: Qwen/Qwen3Guard-Gen-4B, backend: hf, dtype: bfloat16, device: auto, batch_size: 16}
+
+  xstest:
+    enabled: true
+
+  mmlu:
+    enabled: true
+    tasks: [mmlu]
+    num_fewshot: 0               # all 14,042 questions, 0-shot (5-shot would take ~3h per model on M4)
+    batch_size: 16
+    dtype: bfloat16

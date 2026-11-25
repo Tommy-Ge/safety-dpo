@@ -14,7 +14,10 @@ from pathlib import Path
 from .eval.metrics import relative_reduction
 
 log = logging.getLogger(__name__)
-START, END = "<!-- RESULTS:START -->", "<!-- RESULTS:END -->"
+
+
+def markers(name: str = "RESULTS") -> tuple[str, str]:
+    return f"<!-- {name}:START -->", f"<!-- {name}:END -->"
 
 
 def _pct(x, digits=1) -> str:
@@ -231,6 +234,7 @@ def build_report(
     readme: str | None = None,
     data_stats: str | None = None,
     train_log: str | None = None,
+    marker: str = "RESULTS",
 ) -> str:
     rd = Path(results_dir)
     ms = load_metrics(rd, tags)
@@ -258,6 +262,7 @@ def build_report(
     if readme:
         p = Path(readme)
         text = p.read_text(encoding="utf-8")
+        START, END = markers(marker)
         if START in text and END in text:
             text = re.sub(
                 re.escape(START) + r".*?" + re.escape(END), f"{START}\n{md}\n{END}", text, flags=re.S

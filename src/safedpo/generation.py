@@ -45,6 +45,7 @@ class Generator:
         max_lora_rank: int = 64,
         seed: int = 0,
         quantization: str | None = None,
+        device: str = "auto",
     ):
         self.model_name = model
         self.adapter = adapter
@@ -85,7 +86,9 @@ class Generator:
             from transformers import AutoModelForCausalLM
 
             torch_dtype = getattr(torch, dtype) if dtype != "auto" else "auto"
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            from .train import pick_device
+
+            device = pick_device(device)
             if device == "cpu" and torch_dtype in (torch.bfloat16, torch.float16):
                 torch_dtype = torch.float32
             from .train import dtype_kwargs
@@ -142,6 +145,8 @@ class Generator:
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        elif torch.backends.mps.is_available():
+            torch.mps.empty_cache()
 
     # ------------------------------------------------------------------ backends
     def _complete_vllm(self, prompts: list[str], s: SamplingConfig) -> list[list[str]]:
@@ -213,4 +218,5 @@ def build_generator(
         max_lora_rank=cfg.get("max_lora_rank", 64),
         seed=seed,
         quantization=cfg.get("quantization"),
+        device=cfg.get("device", "auto"),
     )

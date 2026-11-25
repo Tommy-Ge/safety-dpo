@@ -27,6 +27,19 @@ def dtype_kwargs(dtype) -> dict:
     return {key: dtype}
 
 
+def pick_device(pref: str | None = "auto") -> str:
+    """``auto`` -> cuda, then Apple-silicon mps, then cpu."""
+    import torch
+
+    if pref and pref != "auto":
+        return pref
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 def _filter_fields(cls, kwargs: dict, what: str) -> dict:
     names = {f.name for f in dataclasses.fields(cls)}
     dropped = sorted(set(kwargs) - names)
@@ -57,8 +70,10 @@ def train(cfg: dict) -> str:
         tok.pad_token = tok.eos_token  # Llama-3 has no pad token; loss masking does not rely on it
 
     # ---------------------------------------------------------------- model
-    use_cuda = torch.cuda.is_available()
-    dtype = getattr(torch, mcfg.get("dtype", "bfloat16")) if use_cuda else torch.float32
+    device = pick_device(mcfg.get("device", "auto"))
+    use_cuda = device == "cuda"
+    # cuda: bf16 weights + bf16 autocast; mps: bf16 weights, LoRA params are upcast to fp32 by PEFT
+    dtype = getattr(torch, mcfg.get("dtype", "bfloat16")) if device != "cpu" else torch.float32
     model_kwargs = dtype_kwargs(dtype)
     if mcfg.get("attn_implementation") and use_cuda:
         model_kwargs["attn_implementation"] = mcfg["attn_implementation"]
@@ -73,6 +88,8 @@ def train(cfg: dict) -> str:
         )
         model_kwargs["device_map"] = {"": 0}
     model = AutoModelForCausalLM.from_pretrained(mcfg["name"], **model_kwargs)
+    if device == "mps":
+        model = model.to("mps")
     if mcfg.get("load_in_4bit"):
         from peft import prepare_model_for_kbit_training
 
@@ -108,7 +125,7 @@ def train(cfg: dict) -> str:
     args_kwargs.setdefault("bf16", use_cuda)
     if not use_cuda:
         args_kwargs["bf16"] = False
-        args_kwargs.setdefault("use_cpu", True)
+        args_kwargs.setdefault("use_cpu", device == "cpu")
     if "test" not in files:
         args_kwargs["eval_strategy"] = "no"
     args = DPOConfig(**_filter_fields(DPOConfig, args_kwargs, "DPOConfig"))

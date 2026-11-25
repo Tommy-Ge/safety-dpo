@@ -41,6 +41,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--update-readme", default=None, metavar="README.md")
     p.add_argument("--data-stats", default=None, metavar="data/processed/stats.json")
     p.add_argument("--train-log", default=None, metavar="outputs/.../log_history.json")
+    p.add_argument("--marker", default="RESULTS", help="README section marker name")
 
     args = ap.parse_args(argv)
     logging.basicConfig(
@@ -80,7 +81,11 @@ def main(argv: list[str] | None = None) -> None:
     elif args.cmd == "report":
         from .report import build_report
 
-        print(build_report(args.results, args.tags, args.update_readme, args.data_stats, args.train_log))
+        print(
+            build_report(
+                args.results, args.tags, args.update_readme, args.data_stats, args.train_log, args.marker
+            )
+        )
 
 
 if __name__ == "__main__":

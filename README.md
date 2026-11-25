@@ -146,6 +146,28 @@ safedpo build-data -o pairing.mix.borderline=0 -o pairing.mix.general=0   # 消�
 
 ## 结果
 
+### A. 笔记本规模复现：Qwen2.5-1.5B-Instruct（Apple M4，24GB）
+
+整条流程完全相同，只是规模缩小，并换成不需要申请权限的 Apache-2.0 模型，在一台 M4 MacBook 的 GPU（MPS）上跑完：`MAC=1 bash scripts/run_gpu.sh`。
+
+| | 完整配置（8B，云 GPU） | 本节（M4 笔记本） |
+|---|---|---|
+| 策略模型 | Llama-3-8B-Instruct | Qwen2.5-1.5B-Instruct |
+| 训练数据标注 | Llama-Guard-3-8B | Qwen3Guard-Gen-0.6B |
+| 评测判定 | HarmBench 官方分类器 / Llama-Guard-3-8B | Qwen3Guard-Gen-4B（与标注模型不同、更大，避免“自己判自己”） |
+| 有害 / 边界 / 普通提示 | 4000 / 1500 / 800，每个提示采样 4 次 | 500 / 250 / 120，每个提示采样 3 次 |
+| 训练 | bf16 LoRA，有效 batch 32，lr 5e-6 | bf16 LoRA（MPS），有效 batch 16，lr 5e-5 |
+| 生成长度上限 | 512 | 256 |
+| MMLU | 5-shot | 0-shot，全部 14,042 题 |
+
+评测集与完整配置相同：HarmBench 240 条行为 × 5 种攻击设置，JBB 100 条有害行为的直接请求加 PAIR / GCG 迁移攻击，外加 100 条良性行为、XSTest 450 条和 MMLU。
+
+<!-- RESULTS-MAC:START -->
+> 正在 M4 上运行，跑完后由 `safedpo report --marker RESULTS-MAC` 自动填入。
+<!-- RESULTS-MAC:END -->
+
+### B. 完整配置：Llama-3-8B-Instruct（云 GPU）
+
 <!-- RESULTS:START -->
 > 还没有在 GPU 上跑出结果。运行 `bash scripts/run_gpu.sh`（或分步运行后执行 `make report`）后，这里会自动填入：主结果表（各基准 ASR、过度拒答率、MMLU，以及相对基座的变化）、各攻击设置的 ASR 及 95% 置信区间、HarmBench 分类别结果、构造出的偏好数据统计和训练曲线。
 <!-- RESULTS:END -->

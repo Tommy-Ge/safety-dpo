@@ -165,7 +165,21 @@ def stage_judge(cfg: dict, recs: list[dict], benches: list[str] | None = None) -
         j = build_judge(
             b["harmbench"].get("judge", {"type": "harmbench_cls", "model": "cais/HarmBench-Llama-2-13b-cls"})
         )
-        for r, v in zip(hb_items, j.judge(hb_items)):
+        if j.name != "harmbench_cls":
+            # generic safety judges see the plain behavior (+context), not the jailbreak wrapper
+            judge_items = [
+                {
+                    "prompt": f"{r['context']}\n\n---\n\n{r['behavior']}"
+                    if r.get("context")
+                    else r["behavior"],
+                    "response": r["response"],
+                    "harmful": True,
+                }
+                for r in hb_items
+            ]
+        else:
+            judge_items = hb_items
+        for r, v in zip(hb_items, j.judge(judge_items)):
             r["success"], r["judged"] = bool(v), True
         j.close()
 
@@ -186,7 +200,8 @@ def stage_judge(cfg: dict, recs: list[dict], benches: list[str] | None = None) -
 
 def stage_mmlu(cfg: dict, model: str, adapter: str | None) -> dict:
     import lm_eval
-    import torch
+
+    from ..train import pick_device
 
     m = cfg["benchmarks"]["mmlu"]
     model_args = f"pretrained={model},dtype={m.get('dtype', 'bfloat16')}"
@@ -199,7 +214,7 @@ def stage_mmlu(cfg: dict, model: str, adapter: str | None) -> dict:
         num_fewshot=m.get("num_fewshot", 5),
         batch_size=m.get("batch_size", "auto"),
         limit=m.get("limit"),
-        device=m.get("device") or ("cuda" if torch.cuda.is_available() else "cpu"),
+        device=pick_device(m.get("device", "auto")),
     )
     out = {}
     for task, r in res["results"].items():

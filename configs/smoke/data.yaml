@@ -2,7 +2,7 @@
 seed: 0
 work_dir: smoke_out/data/work
 out_dir: smoke_out/data/processed
-policy: {model: trl-internal-testing/tiny-LlamaForCausalLM-3.2, backend: hf, dtype: float32, batch_size: 8}
+policy: {model: trl-internal-testing/tiny-LlamaForCausalLM-3.2, backend: hf, dtype: float32, batch_size: 8, device: cpu}
 judge: {type: keyword}
 sources:
   harmful: [{name: harmful_fixture, loader: jsonl, path: tests/fixtures/harmful.jsonl}]

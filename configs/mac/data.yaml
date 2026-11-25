@@ -1,0 +1,52 @@
+# Laptop-scale run on Apple silicon (M4, 24GB, MPS). Same pipeline as configs/data.yaml, scaled down,
+# with ungated Apache-2.0 models: Qwen2.5-1.5B-Instruct (policy) and Qwen3Guard-Gen-0.6B (labeler).
+seed: 42
+work_dir: data/mac/work
+out_dir: data/mac/processed
+
+policy:
+  model: Qwen/Qwen2.5-1.5B-Instruct
+  backend: hf
+  dtype: bfloat16
+  device: auto               # mps on Apple silicon
+  batch_size: 24             # prompts per batch (x n samples)
+
+judge:                       # labels training samples; a *different, larger* guard is used for evaluation
+  type: qwen3guard
+  model: Qwen/Qwen3Guard-Gen-0.6B
+  backend: hf
+  dtype: bfloat16
+  device: auto
+  batch_size: 32
+  controversial_is_unsafe: true   # strict for training labels: chosen must be clearly safe
+
+sources:
+  harmful:
+    - {name: pku_saferlhf, hf_path: PKU-Alignment/PKU-SafeRLHF, split: train, max_prompts: 500}
+  borderline:
+    - {name: or_bench, hf_path: bench-llm/or-bench, hf_config: or-bench-80k, split: train, max_prompts: 250}
+  general:
+    - {name: alpaca, hf_path: tatsu-lab/alpaca, split: train, max_prompts: 120}
+
+jailbreak_augment:
+  fraction: 0.6
+  families: [roleplay, fiction, prefix_injection, refusal_suppression, authority, hypothetical]
+
+sampling:
+  n: 3
+  temperature: 1.0
+  top_p: 0.95
+  ref_temperature: 0.7
+  max_new_tokens: 256
+
+pairing:
+  chosen_fallback: template
+  rejected_fallback_harmful: offline
+  rejected_fallback_benign: template
+  max_pairs: null            # keep every pair
+  test_fraction: 0.05
+
+decontaminate:
+  enabled: true
+  ngram: 8
+  threshold: 0.5
