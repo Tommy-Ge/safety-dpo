@@ -46,7 +46,7 @@ MAIN_COLUMNS = [
     ("Avg ASR ↓", lambda m: m.get("asr_overall_avg"), "asr"),
     ("XSTest Over-refusal ↓", lambda m: _rate(m, "xstest", "over_refusal_safe"), "util"),
     ("JBB Benign Refusal ↓", lambda m: _rate(m, "jbb", "benign_refusal"), "util"),
-    ("MMLU (5-shot) ↑", lambda m: _get(m, "mmlu", "mmlu", "acc"), "util"),
+    ("MMLU ↑", lambda m: _get(m, "mmlu", "mmlu", "acc"), "util"),
 ]
 
 
@@ -67,8 +67,8 @@ def main_table(ms: dict[str, dict]) -> str:
     lines = ["| Model | " + " | ".join(c[0] for c in cols) + " |", "|---|" + "---|" * len(cols)]
     for t in tags:
         lines.append(f"| {t} | " + " | ".join(_pct(c[1](ms[t])) for c in cols) + " |")
-    if len(tags) >= 2:
-        base, new = ms[tags[0]], ms[tags[-1]]
+    for other in tags[1:]:
+        base, new = ms[tags[0]], ms[other]
         cells = []
         for _, fn, kind in cols:
             b, a = fn(base), fn(new)
@@ -79,7 +79,7 @@ def main_table(ms: dict[str, dict]) -> str:
                 cells.append("–" if rr is None else f"**{-100 * rr:+.0f}%** rel.".replace("-", "−"))
             else:
                 cells.append(f"{100 * (a - b):+.1f} pt")
-        lines.append(f"| Δ {tags[-1]} vs {tags[0]} | " + " | ".join(cells) + " |")
+        lines.append(f"| Δ {other} vs {tags[0]} | " + " | ".join(cells) + " |")
     return "\n".join(lines)
 
 
@@ -121,11 +121,33 @@ def category_table(ms: dict[str, dict]) -> str:
     return head + "\n" + "\n".join(rows)
 
 
+def refusal_table(ms: dict[str, dict]) -> str:
+    """LLM-judged vs string-matched refusal rates, shown when any model has LLM verdicts."""
+    if not any(m.get("refusal_method") == "llm" for m in ms.values()):
+        return ""
+    rows = [
+        ("XSTest 安全问题被拒（过度拒答）", ("xstest", "over_refusal_safe")),
+        ("XSTest 不安全问题被拒", ("xstest", "refusal_unsafe")),
+        ("JBB 良性行为被拒", ("jbb", "benign_refusal")),
+    ]
+    tags = list(ms)
+    lines = [
+        "| 指标 | " + " | ".join(f"{t}（LLM / 字符串）" for t in tags) + " |",
+        "|---|" + "---|" * len(tags),
+    ]
+    for name, (bench, key) in rows:
+        cells = [
+            f"{_pct(_rate(ms[t], bench, key))} / {_pct(_rate(ms[t], bench, key + '_strmatch'))}" for t in tags
+        ]
+        lines.append(f"| {name} | " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
 def headline(ms: dict[str, dict]) -> str:
     tags = list(ms)
     if len(tags) < 2:
         return ""
-    base, new = ms[tags[0]], ms[tags[-1]]
+    base, new = ms[tags[0]], ms[tags[1]]  # headline: baseline vs the main model (2nd tag)
     parts = []
     b, a = base.get("asr_overall_avg"), new.get("asr_overall_avg")
     rr = relative_reduction(b, a)
@@ -254,6 +276,11 @@ def build_report(
             "### 各攻击设置的 ASR（%，括号内为 95% Wilson 置信区间）\n\n" + attack_table(ms),
             category_table(ms) and "### HarmBench 各语义类别（直接请求，ASR %）\n\n" + category_table(ms),
             f"![ASR by attack]({rd.as_posix()}/asr_by_attack.png)",
+            refusal_table(ms)
+            and "### 拒答率：LLM 判定 vs 字符串匹配（%）\n\n"
+            "主表里的拒答率用 LLM 判定（Qwen3Guard 的 `Refusal` 字段）。字符串匹配只认“I'm sorry / I cannot”这类固定说法，"
+            "会漏掉换了说法的拒答，下表把两者并列。\n\n"
+            + refusal_table(ms),
             *extra,
         ]
         if s

@@ -21,4 +21,4 @@ smoke_out/
 runs/
 
 .DS_Store
-runs_mac.log
+runs_mac*.log

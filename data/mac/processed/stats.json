@@ -1,0 +1,44 @@
+{
+  "n_prompts": {
+    "harmful": 800,
+    "borderline": 250,
+    "general": 120
+  },
+  "n_pairs_available": {
+    "harmful": 681,
+    "borderline": 220,
+    "general": 115
+  },
+  "n_train": 966,
+  "n_test": 50,
+  "train_by_kind": {
+    "harmful": 641,
+    "borderline": 212,
+    "general": 113
+  },
+  "chosen_from": {
+    "template": 84,
+    "policy_safe": 89,
+    "ref_safety_sysprompt": 508,
+    "policy_compliant": 335
+  },
+  "rejected_from": {
+    "policy_unsafe": 211,
+    "offline_unsafe": 470,
+    "template": 177,
+    "ref_overcautious_sysprompt": 61,
+    "policy_refusal": 97
+  },
+  "jailbreak_family": {
+    "prefix_injection": 52,
+    "none": 500,
+    "fiction": 48,
+    "hypothetical": 45,
+    "roleplay": 13,
+    "authority": 8,
+    "refusal_suppression": 15
+  },
+  "policy_unsafe_rate_on_harmful": 0.2075,
+  "policy_unsafe_rate_on_harmful_jailbreak": 0.4889,
+  "policy_refusal_rate_on_benign": 0.191
+}

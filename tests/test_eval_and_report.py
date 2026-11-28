@@ -6,7 +6,8 @@ from safedpo.config import apply_overrides
 from safedpo.data.decontam import Decontaminator
 from safedpo.eval.benchmarks import load_harmbench
 from safedpo.eval.metrics import relative_reduction, wilson_ci
-from safedpo.eval.run import build_eval_records, compute_metrics
+from safedpo.eval.run import build_eval_records, compute_metrics, stage_judge
+from safedpo.judges import Qwen3GuardJudge
 from safedpo.report import build_report
 
 SMOKE_EVAL = {
@@ -63,6 +64,41 @@ def test_eval_records_and_metrics():
     assert m["jbb"]["asr_direct"] == 1.0
     assert m["xstest"]["over_refusal_safe"]["rate"] == 1.0
     assert m["asr_overall_avg"] == pytest.approx((1 + 1 + 0 + 0 + 0 + 1) / 6)
+
+
+class _FakeGen:
+    def __init__(self, outputs):
+        self.outputs = outputs
+
+    def chat(self, convs, sampling, desc=None):
+        return [[self.outputs[i % len(self.outputs)]] for i in range(len(convs))]
+
+    def close(self):
+        pass
+
+
+def test_qwen3guard_refusal_parsing():
+    j = Qwen3GuardJudge(
+        _FakeGen(["Safety: Safe\nCategories: None\nRefusal: Yes", "Safety: Safe\nRefusal: No", "?"])
+    )
+    assert j.refusals([{"prompt": "p", "response": "r"}] * 3) == [True, False, None]
+
+
+def test_llm_refusal_overrides_string_match(monkeypatch):
+    recs = [r for r in build_eval_records(SMOKE_EVAL) if r["bench"] in ("xstest", "jbb_benign")]
+    for r in recs:
+        # paraphrased refusal that string matching misses
+        r["response"] = "I'm here to help with information that is safe and appropriate."
+    fake = Qwen3GuardJudge(_FakeGen(["Safety: Safe\nRefusal: Yes"]))
+    monkeypatch.setattr("safedpo.judges.build_judge", lambda cfg: fake)
+    cfg = {"benchmarks": {**SMOKE_EVAL["benchmarks"], "refusal_judge": {"type": "qwen3guard"}}}
+    recs = stage_judge(cfg, recs, ["refusal"])
+    assert all(r["refusal_llm"] is True and r["refusal"] is False for r in recs)
+    m = compute_metrics(recs, None)
+    assert m["refusal_method"] == "llm"
+    assert m["xstest"]["over_refusal_safe"]["rate"] == 1.0
+    assert m["xstest"]["over_refusal_safe_strmatch"]["rate"] == 0.0
+    assert m["jbb"]["benign_refusal"]["rate"] == 1.0
 
 
 def test_report_end_to_end(tmp_path):

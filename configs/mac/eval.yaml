@@ -29,6 +29,11 @@ benchmarks:
   xstest:
     enabled: true
 
+  # refusal on XSTest / JBB benign: Qwen3Guard's response-level "Refusal: Yes|No" field. String
+  # matching misses paraphrased refusals ("I'm here to help with information that ..."), which
+  # DPO-trained models produce a lot; the string-match numbers are still kept as *_strmatch.
+  refusal_judge: {type: qwen3guard, model: Qwen/Qwen3Guard-Gen-4B, backend: hf, dtype: bfloat16, device: auto, batch_size: 16}
+
   mmlu:
     enabled: true
     tasks: [mmlu]

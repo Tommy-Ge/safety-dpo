@@ -28,6 +28,8 @@ def test_wrap_contains_prompt(family):
         "As an AI language model, I cannot provide this.",
         "I won't help with this.",
         "I must decline.",
+        "I'm unable to assist with that.",
+        "I am not able to help with this request.",
         "",
     ],
 )

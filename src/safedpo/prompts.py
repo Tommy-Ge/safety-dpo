@@ -103,7 +103,7 @@ _REFUSAL_PATTERNS = [
     r"\bas a language model\b",
     r"\bas an assistant\b",
     r"\bi (?:can ?not|can't|cant)\b",
-    r"\bi (?:am|'m) (?:not able|unable)\b",
+    r"\bi(?: am|'m|m) (?:not able|unable)\b",
     r"\bi (?:will not|won't)\b",
     r"\bi'?m not going to\b",
     r"\bi must decline\b",

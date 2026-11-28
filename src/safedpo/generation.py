@@ -200,6 +200,11 @@ class Generator:
             texts = self.tokenizer.batch_decode(new_tokens, skip_special_tokens=True)
             for j in range(len(batch)):
                 results.append([t.strip() for t in texts[j * s.n : (j + 1) * s.n]])
+            del enc, out, new_tokens
+            if self._device == "mps":
+                # the MPS caching allocator otherwise keeps every batch shape around and drifts into swap
+                torch.mps.empty_cache()
+                log.debug("mps allocated %.1f GB", torch.mps.driver_allocated_memory() / 2**30)
         return results
 
 

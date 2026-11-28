@@ -31,7 +31,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--model", required=True)
     p.add_argument("--adapter", default=None, help="path to a LoRA adapter (omit for the base model)")
     p.add_argument("--stages", default="generate,judge,mmlu,metrics")
-    p.add_argument("--judge-benches", default=None, help="e.g. harmbench or jbb (default: all)")
+    p.add_argument(
+        "--judge-benches",
+        default=None,
+        help="comma-separated subset of harmbench,jbb,refusal (default: all configured)",
+    )
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("-o", "--override", action="append", default=[], metavar="KEY=VALUE")
 

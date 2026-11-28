@@ -104,7 +104,9 @@ def collect(cfg: dict, eval_cfg: dict | None = None) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------- stage 2: generate
-def generate(cfg: dict, rows: list[dict]) -> list[dict]:
+def generate(cfg: dict, rows: list[dict], partial: Path | None = None) -> list[dict]:
+    """Sample on-policy responses. With ``partial`` set, finished chunks are appended to that file
+    and skipped on restart, so an interrupted run (laptop sleep, preemption) resumes where it stopped."""
     s = cfg.get("sampling", {})
     sample_cfg = SamplingConfig(
         n=s.get("n", 4),
@@ -118,29 +120,48 @@ def generate(cfg: dict, rows: list[dict]) -> list[dict]:
         top_p=0.95,
         max_new_tokens=s.get("max_new_tokens", 512),
     )
-    gen = build_generator(cfg["policy"], seed=cfg.get("seed", 42))
-    if sample_cfg.n > 0:
-        samples = gen.chat(
-            [[{"role": "user", "content": r["prompt"]}] for r in rows], sample_cfg, desc="policy samples"
-        )
-    else:  # ablation: no on-policy samples, rejected comes from offline annotations only
-        samples = [[] for _ in rows]
-    refs = gen.chat(
-        [
+    done: dict[str, dict] = {}
+    if partial and partial.exists():
+        done = {r["id"]: r for r in read_jsonl(partial)}
+        log.info("resuming generation: %d / %d prompts already done", len(done), len(rows))
+    todo = [r for r in rows if r["id"] not in done]
+    chunk = int(s.get("chunk_size", 120))
+
+    gen = build_generator(cfg["policy"], seed=cfg.get("seed", 42)) if todo else None
+    for i in range(0, len(todo), chunk):
+        part = todo[i : i + chunk]
+        if sample_cfg.n > 0:
+            samples = gen.chat(
+                [[{"role": "user", "content": r["prompt"]}] for r in part], sample_cfg, desc="policy samples"
+            )
+        else:  # ablation: no on-policy samples, rejected comes from offline annotations only
+            samples = [[] for _ in part]
+        refs = gen.chat(
             [
-                {
-                    "role": "system",
-                    "content": SAFETY_SYSTEM_PROMPT if r["kind"] == "harmful" else OVERCAUTIOUS_SYSTEM_PROMPT,
-                },
-                {"role": "user", "content": r["prompt"]},
-            ]
-            for r in rows
-        ],
-        ref_cfg,
-        desc="reference",
-    )
-    gen.close()
-    return [{**r, "samples": smp, "ref": ref[0]} for r, smp, ref in zip(rows, samples, refs)]
+                [
+                    {
+                        "role": "system",
+                        "content": SAFETY_SYSTEM_PROMPT
+                        if r["kind"] == "harmful"
+                        else OVERCAUTIOUS_SYSTEM_PROMPT,
+                    },
+                    {"role": "user", "content": r["prompt"]},
+                ]
+                for r in part
+            ],
+            ref_cfg,
+            desc="reference",
+        )
+        out = [{**r, "samples": smp, "ref": ref[0]} for r, smp, ref in zip(part, samples, refs)]
+        done.update({r["id"]: r for r in out})
+        if partial:
+            partial.parent.mkdir(parents=True, exist_ok=True)
+            with open(partial, "a", encoding="utf-8") as f:
+                f.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in out)
+        log.info("generated %d / %d prompts", len(done), len(rows))
+    if gen:
+        gen.close()
+    return [done[r["id"]] for r in rows]
 
 
 # ---------------------------------------------------------------------------- stage 3: judge
@@ -282,7 +303,10 @@ def run(cfg: dict, eval_cfg: dict | None = None, stage: str = "all", overwrite: 
             log.info("reusing %s", f_prompts)
     if "generate" in stages:
         if overwrite or not f_gen.exists():
-            write_jsonl(f_gen, generate(cfg, read_jsonl(f_prompts)))
+            f_partial = work / "generations.partial.jsonl"
+            if overwrite and f_partial.exists():
+                f_partial.unlink()
+            write_jsonl(f_gen, generate(cfg, read_jsonl(f_prompts), partial=f_partial))
         else:
             log.info("reusing %s", f_gen)
     if "judge" in stages:

@@ -115,6 +115,10 @@ def train(cfg: dict) -> str:
     if dcfg.get("test_file") and Path(dcfg["test_file"]).exists() and Path(dcfg["test_file"]).stat().st_size:
         files["test"] = dcfg["test_file"]
     ds = load_dataset("json", data_files=files)
+    if dcfg.get("kinds"):  # ablations, e.g. kinds: [harmful] drops the over-refusal (benign) pairs
+        kinds = set(dcfg["kinds"])
+        ds = ds.filter(lambda r: r["kind"] in kinds)
+        log.info("training on kinds %s: %d train pairs", sorted(kinds), len(ds["train"]))
     keep = ["prompt", "chosen", "rejected"]
     ds = ds.remove_columns([c for c in ds["train"].column_names if c not in keep])
     if dcfg.get("max_train_samples"):

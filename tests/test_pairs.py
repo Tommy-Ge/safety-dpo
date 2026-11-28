@@ -98,3 +98,30 @@ def test_mix_and_split():
     assert stats["n_test"] == 1
     assert not {p["id"] for p in train} & {p["id"] for p in test}
     assert stats["policy_unsafe_rate_on_harmful"] == 1.0
+
+
+def test_generate_resumes_from_partial(tmp_path, monkeypatch):
+    import json
+
+    from safedpo.data import build
+
+    calls = []
+
+    class FakeGen:
+        def chat(self, convs, sampling, desc=""):
+            calls.append(len(convs))
+            return [["x"] * sampling.n for _ in convs]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(build, "build_generator", lambda *a, **k: FakeGen())
+    rows = [{"id": f"h{i}", "kind": "harmful", "prompt": f"p{i}"} for i in range(5)]
+    partial = tmp_path / "partial.jsonl"
+    partial.write_text(json.dumps({**rows[0], "samples": ["old"], "ref": "old"}) + "\n")
+    cfg = {"sampling": {"n": 2, "chunk_size": 2}, "policy": {}}
+    out = build.generate(cfg, rows, partial=partial)
+    assert [r["id"] for r in out] == [r["id"] for r in rows]
+    assert out[0]["samples"] == ["old"]  # reused, not regenerated
+    assert calls == [2, 2, 2, 2]  # 4 remaining prompts in chunks of 2: samples + refs per chunk
+    assert len(partial.read_text().splitlines()) == 5

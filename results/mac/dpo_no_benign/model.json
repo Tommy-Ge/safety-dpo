@@ -1,0 +1,5 @@
+{
+  "tag": "dpo_no_benign",
+  "model": "Qwen/Qwen2.5-1.5B-Instruct",
+  "adapter": "outputs/qwen2.5-1.5b-safety-dpo-no-benign/final"
+}

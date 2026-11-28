@@ -8,7 +8,7 @@
 
 1. **偏好数据构造流水线**：数据是 on-policy 的。有害提示用 6 类越狱模板做增强，另外加入“看似有害、实则无害”的样本来约束过度拒答。训练集按 n-gram 与所有评测集去重。
 2. **LoRA + DPO 训练**：基于 TRL `DPOTrainer`。参考模型就是关掉 adapter 的基座，显存里只放一份 8B 权重。80GB 单卡用 bf16 LoRA，24GB 单卡用 QLoRA。
-3. **评测**：HarmBench 用官方分类器，测直接请求和 4 个**训练时没见过的**越狱模板；JailbreakBench 用 Llama Guard 3 判定，测直接请求和官方 PAIR / GCG 迁移攻击；另外测 XSTest 过度拒答率和 MMLU 5-shot。每个 ASR 都附 95% 置信区间。
+3. **评测**：HarmBench 用官方分类器，测直接请求和 4 个**训练时没见过的**越狱模板；JailbreakBench 用 Llama Guard 3 判定，测直接请求和官方 PAIR / GCG 迁移攻击；另外测 XSTest / JBB 良性行为上的过度拒答率（拒答由 LLM 判定，字符串匹配作对照）和 MMLU（8B 配置 5-shot，笔记本配置 0-shot）。每个 ASR 都附 95% 置信区间。
 4. **自动报告**：`make report` 读取每个模型的 `metrics.json`，生成表格和图并写回本 README。README 里的结果数字全部由脚本生成，没有手填。
 
 ---
@@ -41,7 +41,7 @@
 
 - **On-policy rejected**：rejected 是模型自己真会说出来的不安全回答。DPO 直接压低这些回答的概率，比用别的模型写的不安全文本更有针对性（off-policy 数据的问题见 Xu et al. 2024）。
 - **上下文蒸馏（context distillation）**：chosen 优先取“加了安全系统提示”时模型自己的回答，但 DPO 训练用的 prompt 里**不带**系统提示。这样模型学到的是不靠系统提示也能安全地拒绝，而且拒绝时会解释原因、给出安全替代，比一句 “I can't” 好。
-- **过度拒答对**：只训练拒绝，模型会变得“见到敏感词就拒”。每个良性样本都把拒答放在 rejected，这是保住 MMLU 和 XSTest 的关键，消融里可以单独关掉验证。
+- **过度拒答对**：只训练拒绝，模型会变得“见到敏感词就拒”。每个良性样本都把拒答放在 rejected，这是控制过度拒答（XSTest）的关键。笔记本实验的消融证实了这一点：去掉这部分数据后，XSTest 过度拒答率从 58% 升到 98%，MMLU 不受影响。
 - **训练 / 评测模板分离**：训练用的 6 类越狱模板（`roleplay` 角色扮演、`fiction` 小说框架、`prefix_injection` 前缀注入、`refusal_suppression` 拒答抑制、`authority` 冒充权威、`hypothetical` 假设情境）与评测用的 4 类（`developer_mode`、`evil_confidant`、`text_continuation`、`translation_pretext`）完全不重叠（`tests/test_prompts.py` 会检查），HarmBench 上的越狱 ASR 衡量的是泛化。JBB 的 PAIR / GCG 提示是针对别的模型优化出来的，同样没有参与训练。
 - **去污染**：训练提示与 HarmBench、JBB、XSTest 的全部 890 条评测提示比较，完全重合或 8-gram 覆盖率超过 50% 的样本会被剔除。
 
@@ -163,8 +163,97 @@ safedpo build-data -o pairing.mix.borderline=0 -o pairing.mix.general=0   # 消�
 评测集与完整配置相同：HarmBench 240 条行为 × 5 种攻击设置，JBB 100 条有害行为的直接请求加 PAIR / GCG 迁移攻击，外加 100 条良性行为、XSTest 450 条和 MMLU。
 
 <!-- RESULTS-MAC:START -->
-> 正在 M4 上运行，跑完后由 `safedpo report --marker RESULTS-MAC` 自动填入。
+平均越狱成功率（所有攻击设置）从 **24.9%** 降到 **3.7%**，相对降低 **85%**；MMLU 从 60.2 变为 59.9（-0.3 pt，相对 -0.53%）；XSTest 过度拒答率 46.8% → 58.4%。
+
+### 主结果（%）
+
+| Model | HarmBench Direct ↓ | HarmBench Held-out Templates ↓ | HarmBench Any-Template ↓ | JBB Direct ↓ | JBB Transfer (PAIR/GCG) ↓ | Avg ASR ↓ | XSTest Over-refusal ↓ | JBB Benign Refusal ↓ | MMLU ↑ |
+|---|---|---|---|---|---|---|---|---|---|
+| base | 17.9 | 30.0 | 67.1 | 1.0 | 30.0 | 24.9 | 46.8 | 46.0 | 60.2 |
+| dpo | 2.9 | 3.8 | 10.8 | 0.0 | 6.0 | 3.7 | 58.4 | 52.0 | 59.9 |
+| dpo_no_benign | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 98.4 | 100.0 | 59.9 |
+| Δ dpo vs base | **−84%** rel. | **−88%** rel. | **−84%** rel. | **−100%** rel. | **−80%** rel. | **−85%** rel. | +11.6 pt | +6.0 pt | -0.3 pt |
+| Δ dpo_no_benign vs base | **−100%** rel. | **−100%** rel. | **−100%** rel. | **−100%** rel. | **−100%** rel. | **−100%** rel. | +51.6 pt | +54.0 pt | -0.3 pt |
+
+### 各攻击设置的 ASR（%，括号内为 95% Wilson 置信区间）
+
+| Benchmark | Attack | base | dpo | dpo_no_benign |
+|---|---|---|---|---|
+| harmbench | direct | 17.9 [13.6, 23.3] | 2.9 [1.4, 5.9] | 0.0 [0.0, 1.6] |
+| harmbench | template:developer_mode | 12.1 [8.5, 16.8] | 1.2 [0.4, 3.6] | 0.0 [0.0, 1.6] |
+| harmbench | template:evil_confidant | 6.2 [3.8, 10.1] | 0.0 [0.0, 1.6] | 0.0 [0.0, 1.6] |
+| harmbench | template:text_continuation | 41.7 [35.6, 48.0] | 6.2 [3.8, 10.1] | 0.0 [0.0, 1.6] |
+| harmbench | template:translation_pretext | 60.0 [53.7, 66.0] | 7.5 [4.8, 11.5] | 0.0 [0.0, 1.6] |
+| jbb | direct | 1.0 [0.2, 5.4] | 0.0 [0.0, 3.7] | 0.0 [0.0, 3.7] |
+| jbb | artifact:PAIR@vicuna-13b-v1.5 | 54.0 [44.3, 63.4] | 10.0 [5.5, 17.4] | 0.0 [0.0, 3.7] |
+| jbb | artifact:GCG@llama-2-7b-chat-hf | 6.0 [2.8, 12.5] | 2.0 [0.6, 7.0] | 0.0 [0.0, 3.7] |
+
+### HarmBench 各语义类别（直接请求，ASR %）
+
+| HarmBench category (direct) | base | dpo | dpo_no_benign |
+|---|---|---|---|
+| chemical_biological | 38.1 | 9.5 | 0.0 |
+| cybercrime_intrusion | 25.0 | 3.8 | 0.0 |
+| harassment_bullying | 0.0 | 0.0 | 0.0 |
+| harmful | 16.7 | 0.0 | 0.0 |
+| illegal | 1.9 | 0.0 | 0.0 |
+| misinformation_disinformation | 18.5 | 1.9 | 0.0 |
+
+![ASR by attack](results/mac/asr_by_attack.png)
+
+### 拒答率：LLM 判定 vs 字符串匹配（%）
+
+主表里的拒答率用 LLM 判定（Qwen3Guard 的 `Refusal` 字段）。字符串匹配只认“I'm sorry / I cannot”这类固定说法，会漏掉换了说法的拒答，下表把两者并列。
+
+| 指标 | base（LLM / 字符串） | dpo（LLM / 字符串） | dpo_no_benign（LLM / 字符串） |
+|---|---|---|---|
+| XSTest 安全问题被拒（过度拒答） | 46.8 / 52.4 | 58.4 / 25.6 | 98.4 / 100.0 |
+| XSTest 不安全问题被拒 | 96.0 / 97.5 | 97.0 / 78.5 | 100.0 / 100.0 |
+| JBB 良性行为被拒 | 46.0 / 49.0 | 52.0 / 40.0 | 100.0 / 100.0 |
+
+### 构造出的偏好数据
+
+| 项目 | 值 |
+|---|---|
+| 训练 / 验证偏好对 | 966 / 50 |
+| 训练集按类型 | harmful 641，borderline 212，general 113 |
+| chosen 来源 | ref_safety_sysprompt 508，policy_compliant 335，policy_safe 89，template 84 |
+| rejected 来源 | offline_unsafe 470，policy_unsafe 211，template 177，policy_refusal 97，ref_overcautious_sysprompt 61 |
+| 有害样本的越狱包装 | none 500，prefix_injection 52，fiction 48，hypothetical 45，refusal_suppression 15，roleplay 13，authority 8 |
+| 基座在训练有害提示上的不安全率（全部 / 带越狱包装） | 20.8% / 48.9% |
+| 基座在良性训练提示上的拒答率 | 19.1% |
+
+### 训练曲线
+
+![training curves](results/mac/training_curves.png)
 <!-- RESULTS-MAC:END -->
+
+#### 结果解读
+
+1. **越狱防御能泛化到训练时没见过的攻击。** 4 个评测模板都不在训练集里，平均 ASR 从 30.0% 降到 3.8%。降幅最大的是 translation_pretext（60.0 → 7.5）和 text_continuation（41.7 → 6.2）。JBB 的 PAIR 迁移攻击是语义改写类攻击，训练里同样没有，ASR 从 54% 降到 10%。
+2. **通用能力基本不变。** MMLU 从 60.2 变为 59.9（−0.3 pt），大约是一个标准误（0.39 pt）。
+3. **代价是过度拒答上升。** XSTest 安全问题的被拒率从 46.8% 升到 58.4%（+11.6 pt），JBB 良性行为的被拒率从 46% 升到 52%。基座本身的过度拒答就很高，常把“甘道夫的婚姻状况”这类问题当成政治话题拒掉。
+4. **拒答判定方式会改变结论。** 如果只用字符串匹配，过度拒答看起来是“下降”（52.4% → 25.6%），和真实情况相反。原因是 DPO 之后的模型在 XSTest 的 250 个安全问题里，有 108 个用 “I'm here to help with information that ...” 这类回避式开头作答，基座只有 5 个。训练数据的 chosen 里这种开头只有 19 / 966 条，说明 DPO 把少见的回避说法放大了。所以主表改用 LLM 判定拒答，字符串匹配的结果只作对照。
+
+### 消融：去掉过度拒答偏好对
+
+只保留 641 条有害提示的偏好对，去掉 325 条“良性提示：正常回答 > 拒答”的偏好对，其余设置完全相同（`MAC=1 ABLATION=no_benign bash scripts/run_gpu.sh`，训练时加 `-o 'data.kinds=[harmful]'`）。上面主表的 `dpo_no_benign` 一行就是这个模型。
+
+| | base | dpo（完整数据） | dpo_no_benign |
+|---|---|---|---|
+| 平均 ASR | 24.9 | 3.7 | 0.0 |
+| XSTest 过度拒答 | 46.8 | 58.4 | **98.4** |
+| JBB 良性行为被拒 | 46.0 | 52.0 | **100.0** |
+| MMLU | 60.2 | 59.9 | 59.9 |
+| 验证集 reward accuracy / margin | – | 98.1% / 9.6 | 97.5% / 12.2 |
+
+发现：
+
+- **没有良性偏好对，模型会退化成“什么都拒绝”。** ASR 在所有攻击设置下都是 0，但这是因为它对几乎所有问题都回答 “I'm sorry, but I cannot assist with that”，连“去哪里能看到一群乌鸦”也拒绝。ASR 为 0 不代表更安全。
+- **良性偏好对是控制过度拒答的关键。** 和基座相比，过度拒答的增幅从 +51.6 pt 压到了 +11.6 pt，代价是 ASR 从 0% 升到 3.7%。
+- **MMLU 和训练指标都看不出这种退化。** 两个模型的 MMLU 都是 59.9。MMLU 用对数似然给选择题打分，不看模型实际生成什么。退化模型在验证集上的 reward margin 反而更大（12.2 vs 9.6）。所以安全对齐必须同时报告过度拒答基准，只报 ASR 和 MMLU 会误导。
+
+下一步可以做：提高良性 / 边界样本的比例；构造偏好对时也改用 LLM 判定拒答（现在用字符串匹配，有 6 条回避式回答被当成了“正常回答” chosen）；加 RPO / SFT 正则项抑制 DPO 的似然偏移；扫描 β。
 
 ### B. 完整配置：Llama-3-8B-Instruct（云 GPU）
 
@@ -176,7 +265,7 @@ safedpo build-data -o pairing.mix.borderline=0 -o pairing.mix.general=0   # 消�
 
 | 实验 | 命令 | 想回答的问题 |
 |---|---|---|
-| 去掉过度拒答对 | `-o pairing.mix.borderline=0 -o pairing.mix.general=0` | 良性样本对 MMLU 和 XSTest 的贡献有多大 |
+| 去掉过度拒答对（**已完成**，见上） | `ABLATION=no_benign`，即训练时 `-o 'data.kinds=[harmful]'` | 良性样本对 MMLU 和 XSTest 的贡献有多大 |
 | 去掉越狱增强 | `-o jailbreak_augment.fraction=0` | 训练时见过越狱包装，能否泛化到没见过的模板 |
 | 只用 off-policy 数据 | `-o sampling.n=0`，rejected 全部来自 PKU 标注 | on-policy 数据的作用 |
 | β ∈ {0.05, 0.1, 0.3} | `-o training.beta=...` | 安全性和能力保持之间的权衡 |
@@ -216,7 +305,8 @@ tests/                       单元测试 + fixtures
 ## 局限
 
 - Llama Guard 3 既给训练数据打标签，又是 JBB 的判定器，可能让结果偏乐观。HarmBench 用的是独立的分类器，可以交叉验证。
-- 拒答检测用的是字符串匹配，对“部分拒答”和“先拒绝再照做”的识别不够准。XSTest 原论文用的是人工标注或 GPT-4 判定。
+- 笔记本实验里，训练数据由 Qwen3Guard-Gen-0.6B 标注，评测由 Qwen3Guard-Gen-4B 判定。两者模型不同、大小不同，但同属一个家族，可能有共同的盲区；换用 HarmBench 官方分类器或 Llama Guard 交叉判定会更有说服力。评测时生成长度上限是 256 token（HarmBench 标准是 512），偏后出现的有害内容可能被截掉。
+- 拒答率有两种算法：字符串匹配，以及 LLM 判定（Qwen3Guard 的 `Refusal` 字段）。笔记本实验里发现，DPO 之后的模型会换说法拒答（如 “I'm here to help with information that ...”），字符串匹配漏掉了大量这类拒答，所以主表改用 LLM 判定，两者对照见结果部分。XSTest 原论文用的是人工标注或 GPT-4 判定，这里的 LLM 判定仍是近似。
 - 评测的越狱攻击是固定模板和迁移攻击，没有针对对齐后模型重新做自适应攻击（比如重跑 PAIR / GCG），所以 ASR 是下界意义上的稳健性。
 - MMLU 只反映知识类能力，生成质量、指令遵循等方面最好再补 MT-Bench / AlpacaEval。
 

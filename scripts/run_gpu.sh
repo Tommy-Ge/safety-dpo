@@ -6,6 +6,8 @@
 #   QLORA=1 bash scripts/run_gpu.sh   # 24GB GPU: QLoRA training + fp8 HarmBench judge
 #   SMOKE=1 bash scripts/run_gpu.sh   # CPU-only rehearsal of this script with a tiny model (CI / laptops)
 #   MAC=1   bash scripts/run_gpu.sh   # laptop-scale run on Apple silicon: Qwen2.5-1.5B + Qwen3Guard (configs/mac)
+#   ABLATION=no_benign bash scripts/run_gpu.sh   # after a main run: retrain without the over-refusal pairs,
+#                                                # evaluate it, and report base / dpo / dpo_no_benign together
 #
 # Every finished step leaves runs/<run>/logs/<step>.done; finished steps are skipped on re-run.
 # At the end, runs/<run>/bundle.tar.gz holds everything needed to update the GitHub repo
@@ -18,9 +20,16 @@ QUICK=${QUICK:-0}
 QLORA=${QLORA:-0}
 SMOKE=${SMOKE:-0}
 MAC=${MAC:-0}
+ABLATION=${ABLATION:-}
 DATA_CFG=configs/data.yaml
 EVAL_CFG=configs/eval.yaml
-export TOKENIZERS_PARALLELISM=false
+export TOKENIZERS_PARALLELISM=false PYTHONUNBUFFERED=1
+
+# macOS: hold a no-idle-sleep assertion for the lifetime of this script (a closed lid still sleeps)
+if command -v caffeinate >/dev/null 2>&1 && [[ -z "${CAFFEINATED:-}" ]]; then
+  export CAFFEINATED=1
+  exec caffeinate -i -s "$0" "$@"
+fi
 
 # AutoDL "academic acceleration" (GitHub / Hugging Face proxy) if available
 if [[ -f /etc/network_turbo && -z "${NO_TURBO:-}" ]]; then
@@ -70,6 +79,21 @@ DATA_O+=(-o work_dir=$DATA_DIR/work -o out_dir=$DATA_DIR/processed)
 TRAIN_O+=(-o training.output_dir=$OUT_DIR -o data.train_file=$DATA_DIR/processed/train.jsonl
           -o data.test_file=$DATA_DIR/processed/test.jsonl)
 EVAL_O+=(-o results_dir=$RESULTS)
+MAIN_OUT_DIR=$OUT_DIR   # training curves in the report always show the main model
+SUFFIX=""
+EVAL_TAGS=(base dpo)
+REPORT_TAGS=(base dpo)
+if [[ -n "$ABLATION" ]]; then
+  case "$ABLATION" in
+    no_benign) TRAIN_O+=(-o 'data.kinds=[harmful]') ;;
+    *) echo "unknown ABLATION=$ABLATION (supported: no_benign)"; exit 1 ;;
+  esac
+  SUFFIX="_$ABLATION"
+  OUT_DIR=${OUT_DIR}${SUFFIX//_/-}
+  TRAIN_O+=(-o training.output_dir=$OUT_DIR)
+  EVAL_TAGS=("dpo$SUFFIX")
+  REPORT_TAGS=(base dpo "dpo$SUFFIX")
+fi
 ADAPTER=$OUT_DIR/final
 LOGS=$RUN/logs
 mkdir -p "$LOGS"
@@ -116,27 +140,30 @@ for st in collect generate judge pair; do
 done
 
 # ------------------------------------------------------------------ 2. train
-step train safedpo train --config $TRAIN_CFG "${TRAIN_O[@]}"
+step "train$SUFFIX" safedpo train --config $TRAIN_CFG "${TRAIN_O[@]}"
 
 # ------------------------------------------------------------------ 3. eval (one vLLM model per process)
-for tag in base dpo; do
-  AD=(); [[ $tag == dpo ]] && AD=(--adapter "$ADAPTER")
+for tag in "${EVAL_TAGS[@]}"; do
+  AD=(); [[ $tag == dpo* ]] && AD=(--adapter "$ADAPTER")
   E=(safedpo eval --config $EVAL_CFG --tag $tag --model "$BASE" ${AD[@]+"${AD[@]}"} "${EVAL_O[@]}")
   step "eval_${tag}_generate"        "${E[@]}" --stages generate
   step "eval_${tag}_judge_harmbench" "${E[@]}" --stages judge --judge-benches harmbench
   step "eval_${tag}_judge_jbb"       "${E[@]}" --stages judge --judge-benches jbb
+  if grep -q '^  refusal_judge:' $EVAL_CFG; then
+    step "eval_${tag}_judge_refusal" "${E[@]}" --stages judge --judge-benches refusal
+  fi
   step "eval_${tag}_mmlu"            "${E[@]}" --stages mmlu
   step "eval_${tag}_metrics"         "${E[@]}" --stages metrics
 done
 
 # ------------------------------------------------------------------ 4. report + bundle
-safedpo report --results $RESULTS --tags base dpo ${README_ARG[@]+"${README_ARG[@]}"} \
-  --data-stats $DATA_DIR/processed/stats.json --train-log $OUT_DIR/log_history.json | tee "$LOGS/report.log"
+safedpo report --results $RESULTS --tags "${REPORT_TAGS[@]}" ${README_ARG[@]+"${README_ARG[@]}"} \
+  --data-stats $DATA_DIR/processed/stats.json --train-log $MAIN_OUT_DIR/log_history.json | tee "$LOGS/report.log"
 
 FILES=$(ls -d README.md $RESULTS/summary.md $RESULTS/*.png $RESULTS/*/metrics.json $RESULTS/*/mmlu.json \
           $RESULTS/*/model.json $DATA_DIR/processed/stats.json $OUT_DIR/*.json "$LOGS" 2>/dev/null || true)
-tar czf $RUN/bundle.tar.gz $FILES
-tar czf $RUN/adapter.tar.gz -C "$(dirname "$ADAPTER")" "$(basename "$ADAPTER")"
+tar czf $RUN/bundle$SUFFIX.tar.gz $FILES
+tar czf $RUN/adapter$SUFFIX.tar.gz -C "$(dirname "$ADAPTER")" "$(basename "$ADAPTER")"
 echo
-echo "done. results:  $RUN/bundle.tar.gz   (download it and unpack in the repo root)"
-echo "      adapter:  $RUN/adapter.tar.gz  (LoRA weights, optional)"
+echo "done. results:  $RUN/bundle$SUFFIX.tar.gz   (download it and unpack in the repo root)"
+echo "      adapter:  $RUN/adapter$SUFFIX.tar.gz  (LoRA weights, optional)"
